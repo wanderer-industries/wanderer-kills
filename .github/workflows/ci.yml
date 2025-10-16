@@ -8,6 +8,10 @@ on:
   pull_request:
     branches: [main]
 
+env:
+  GH_TOKEN: ${{ github.token }}
+  REGISTRY_IMAGE: wandererltd/wanderer-kills
+
 jobs:
   test:
     name: Test
@@ -323,7 +327,7 @@ jobs:
               # Fallback: fetch tags and get current tag
               git fetch --tags --force
               VERSION_TAG=$(git describe --exact-match --tags HEAD 2>/dev/null || echo "")
-              
+
               if [[ -z "$VERSION_TAG" ]]; then
                 # Last resort: extract from mix.exs
                 VERSION=$(grep -E '^\s+version:' mix.exs | head -1 | grep -o '"[^"]*"' | tr -d '"')
@@ -342,7 +346,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: guarzo/wanderer-kills
+          images: ${{ env.REGISTRY_IMAGE }}
           tags: |
             type=ref,event=branch
             type=ref,event=tag
@@ -359,7 +363,7 @@ jobs:
           platforms: linux/amd64
           push: false
           load: true
-          tags: guarzo/wanderer-kills:test
+          tags: ${{ env.REGISTRY_IMAGE }}:test
           cache-from: type=gha
           build-args: |
             VCS_REF=${{ github.sha }}
@@ -369,7 +373,7 @@ jobs:
       - name: Test Docker image
         run: |
           # Basic container test - start and check health
-          docker run -d --name test_container -p 4004:4004 guarzo/wanderer-kills:test
+          docker run -d --name test_container -p 4004:4004 ${{ env.REGISTRY_IMAGE }}:test
 
           # Give it a moment to start
           sleep 5
@@ -415,10 +419,10 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: |
             type=gha
-            type=registry,ref=guarzo/wanderer-kills:buildcache
+            type=registry,ref=${{ env.REGISTRY_IMAGE }}:buildcache
           cache-to: |
             type=gha,mode=max
-            type=registry,ref=guarzo/wanderer-kills:buildcache,mode=max
+            type=registry,ref=${{ env.REGISTRY_IMAGE }}:buildcache,mode=max
           build-args: |
             VCS_REF=${{ github.sha }}
             BUILD_DATE=${{ github.event.head_commit.timestamp }}
@@ -480,12 +484,10 @@ jobs:
             ## Docker Image
 
             ```bash
-            docker pull guarzo/wanderer-kills:${{ steps.get_version.outputs.VERSION }}
+            docker pull ${{ env.REGISTRY_IMAGE }}:${{ steps.get_version.outputs.VERSION }}
             ```
           draft: false
           prerelease: false
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   auto-tag:
     name: Auto Tag Version
@@ -502,7 +504,6 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Extract version from mix.exs
         id: extract_version
@@ -560,7 +561,7 @@ jobs:
     runs-on: ubuntu-latest
     # Run when auto-tag creates a new tag on main branch
     if: |
-      github.ref == 'refs/heads/main' && 
+      github.ref == 'refs/heads/main' &&
       needs.auto-tag.outputs.new_tag_created == 'true'
 
     permissions:
@@ -610,25 +611,23 @@ jobs:
             ## Docker Image
 
             ```bash
-            docker pull guarzo/wanderer-kills:${{ steps.get_version.outputs.VERSION }}
+            docker pull ${{ env.REGISTRY_IMAGE }}:${{ steps.get_version.outputs.VERSION }}
             ```
           draft: false
           prerelease: false
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   deploy:
     name: Deploy to Server
     needs: [docker, auto-tag]
     runs-on: ubuntu-latest
     # Deploy on push to main branch (uses latest tag)
-    if: github.ref == 'refs/heads/main'
-    
+    if: github.ref == 'refs/heads/develop'
+
     environment: production
-    
+
     steps:
       - uses: actions/checkout@v4
-      
+
       - name: Deploy to production server
         uses: appleboy/ssh-action@v1.0.3
         env:
@@ -648,7 +647,7 @@ jobs:
           envs: PORT,MIX_ENV,REPLACE_OS_VARS,HOME,LANG,LANGUAGE,LC_ALL
           script: |
             echo "🚀 Starting deployment for WandererKills (latest)"
-            
+
             # Set environment variables for the deployment
             export PORT=$PORT
             export MIX_ENV=$MIX_ENV
@@ -657,36 +656,36 @@ jobs:
             export LANG=$LANG
             export LANGUAGE=$LANGUAGE
             export LC_ALL=$LC_ALL
-            
+
             # Navigate to application directory
             cd /app/wanderer || { echo "❌ Failed to navigate to /app/wanderer directory"; exit 1; }
-            
+
             # Verify compose-manager.sh exists
             if [ ! -f "./compose-manager.sh" ]; then
               echo "❌ compose-manager.sh not found in /app/wanderer directory"
               exit 1
             fi
-            
+
             # Make sure compose-manager.sh is executable
             chmod +x ./compose-manager.sh
-            
+
             # Run the upgrade command
             echo "🔄 Running compose-manager.sh upgrade wanderer-kills"
             ./compose-manager.sh upgrade wanderer-kills
-            
+
             if [ $? -eq 0 ]; then
               echo "✅ Deployment completed successfully"
             else
               echo "❌ Deployment failed"
               exit 1
             fi
-      
+
       - name: Deployment status notification
         if: always()
         run: |
           if [ "${{ job.status }}" == "success" ]; then
             echo "✅ **Deployment Successful**" >> $GITHUB_STEP_SUMMARY
-            echo "- Image: guarzo/wanderer-kills:latest" >> $GITHUB_STEP_SUMMARY
+            echo "- Image: ${{ env.REGISTRY_IMAGE }}:latest" >> $GITHUB_STEP_SUMMARY
             echo "- Target: Production Server" >> $GITHUB_STEP_SUMMARY
             echo "- Command: ./compose-manager.sh upgrade wanderer-kills" >> $GITHUB_STEP_SUMMARY
           else
