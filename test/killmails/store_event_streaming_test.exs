@@ -1,5 +1,5 @@
 defmodule WandererKills.Ingest.Killmails.StoreEventStreamingTest do
-  use WandererKills.UnifiedTestCase
+  use WandererKills.UnifiedTestCase, async: false
 
   alias WandererKills.Core.Storage.KillmailStore
 

@@ -1,6 +1,7 @@
 defmodule WandererKills.Ingest.Historical.HistoricalStreamerRetryTest do
   use WandererKills.DataCase, async: false
   import Mox
+  import WandererKills.TestHelpers
 
   alias WandererKills.Ingest.Historical.HistoricalStreamer
   alias WandererKills.Ingest.Killmails.ZkbClient.Mock, as: ZkbClientMock

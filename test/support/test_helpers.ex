@@ -135,13 +135,25 @@ defmodule WandererKills.TestHelpers do
   Sets up common mocks for testing.
   """
   def setup_mocks do
-    # Try to set global mode, catch any errors if already set
-    try do
-      Mox.set_mox_global()
-    catch
-      :error, _ ->
-        # Already in global mode or other error, that's fine
-        :ok
+    # Set global mode if not already set
+    if function_exported?(Mox, :global_mode?, 0) do
+      unless Mox.global_mode?() do
+        Mox.set_mox_global()
+      end
+    else
+      # Fallback: try to set global mode, rescue only the specific error
+      try do
+        Mox.set_mox_global()
+      rescue
+        error in [RuntimeError, ArgumentError] ->
+          # Only catch the specific "already in global mode" error
+          if error.message =~ ~r/already (in|set to) global mode/i do
+            :ok
+          else
+            # Re-raise any other errors
+            reraise error, __STACKTRACE__
+          end
+      end
     end
 
     setup_http_client_mocks()
