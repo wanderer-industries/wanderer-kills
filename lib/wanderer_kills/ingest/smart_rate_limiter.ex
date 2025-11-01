@@ -422,7 +422,16 @@ defmodule WandererKills.Ingest.SmartRateLimiter do
         }
 
         new_buckets = Map.put(state.service_buckets, service, updated_bucket)
-        new_state = %{state | service_buckets: new_buckets}
+
+        # Clear all reservations for this service
+        new_reservations =
+          state.reservations
+          |> Enum.reject(fn {_id, reservation} ->
+            reservation.service == service
+          end)
+          |> Enum.into(%{})
+
+        new_state = %{state | service_buckets: new_buckets, reservations: new_reservations}
 
         Logger.info("[SmartRateLimiter] Simple mode bucket reset",
           service: service,
@@ -537,7 +546,26 @@ defmodule WandererKills.Ingest.SmartRateLimiter do
     # ESI max is 5 tokens (for 4xx responses), ZKB is 1 token
     required_tokens = if service == :esi, do: 5.0, else: 1.0
 
-    if bucket && bucket.tokens >= required_tokens do
+    # Calculate available tokens accounting for existing reservations
+    available_tokens =
+      if bucket do
+        reserved_tokens =
+          state.reservations
+          |> Map.values()
+          |> Enum.reduce(0.0, fn
+            %{service: ^service, reserved_tokens: reservation_tokens}, acc ->
+              acc + reservation_tokens
+
+            _, acc ->
+              acc
+          end)
+
+        bucket.tokens - reserved_tokens
+      else
+        0.0
+      end
+
+    if bucket && available_tokens >= required_tokens do
       # Create reservation
       reservation_id = generate_reservation_id()
 
@@ -556,7 +584,7 @@ defmodule WandererKills.Ingest.SmartRateLimiter do
 
       {:reply, {:ok, reservation_id}, new_state}
     else
-      tokens_available = if bucket, do: bucket.tokens, else: 0
+      tokens_available = max(available_tokens, 0.0)
 
       Logger.warning("[SmartRateLimiter] Cannot reserve tokens",
         service: service,

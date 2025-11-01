@@ -149,13 +149,14 @@ defmodule WandererKills.Ingest.SmartRateLimiterESITest do
 
       # Test with a custom value
       original_config = Application.get_env(:wanderer_kills, :smart_rate_limiter)
+      original_config_list = original_config || []
 
       try do
         # Set a shorter timeout for testing
         Application.put_env(
           :wanderer_kills,
           :smart_rate_limiter,
-          Keyword.put(original_config, :reservation_cleanup_timeout_ms, 100)
+          Keyword.put(original_config_list, :reservation_cleanup_timeout_ms, 100)
         )
 
         # Verify the config was updated
@@ -163,8 +164,47 @@ defmodule WandererKills.Ingest.SmartRateLimiterESITest do
         assert Keyword.get(new_config, :reservation_cleanup_timeout_ms) == 100
       after
         # Restore original config
-        Application.put_env(:wanderer_kills, :smart_rate_limiter, original_config)
+        if original_config do
+          Application.put_env(:wanderer_kills, :smart_rate_limiter, original_config)
+        else
+          Application.delete_env(:wanderer_kills, :smart_rate_limiter)
+        end
       end
+    end
+
+    test "prevents reservation oversubscription" do
+      # Reset bucket to start fresh
+      SmartRateLimiter.reset_bucket(:esi)
+
+      # Get initial state
+      initial_state = SmartRateLimiter.get_bucket_state(:esi)
+      initial_tokens = initial_state.tokens
+
+      # ESI requires 5 tokens per reservation
+      # Calculate how many reservations we can make
+      max_reservations = trunc(initial_tokens / 5.0)
+
+      # Make all possible reservations
+      for i <- 1..max_reservations do
+        case SmartRateLimiter.reserve_token(:esi) do
+          {:ok, _reservation_id} ->
+            :ok
+
+          {:error, _} ->
+            flunk(
+              "Failed to reserve token #{i} when we should have had capacity (initial: #{initial_tokens}, max: #{max_reservations})"
+            )
+        end
+      end
+
+      # The next reservation should fail
+      assert {:error, error} = SmartRateLimiter.reserve_token(:esi)
+      assert error.type == :rate_limited
+      assert error.details.tokens_available < 5.0
+      assert error.details.tokens_required == 5.0
+
+      # Clean up - reset bucket to avoid affecting other tests
+      SmartRateLimiter.reset_bucket(:esi)
     end
   end
 

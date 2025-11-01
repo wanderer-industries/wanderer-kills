@@ -371,20 +371,22 @@ defmodule WandererKills.Http.Client do
   end
 
   defp handle_response(429, body, headers) do
-    # Extract retry-after header if present
-    retry_after_value =
-      Enum.find_value(headers, fn
-        {"retry-after", value} -> value
-        {"x-esi-error-limit-remain", value} -> value
-        _ -> nil
-      end)
+    # Extract retry-after header if present (prefer retry-after over x-esi-error-limit-reset)
+    headers_map = Map.new(headers, fn {k, v} -> {String.downcase(k), v} end)
 
-    # Return structured error with retry information
     retry_after_ms =
-      if retry_after_value do
-        parse_retry_after(retry_after_value)
-      else
-        nil
+      cond do
+        # First check for standard Retry-After header
+        Map.has_key?(headers_map, "retry-after") ->
+          parse_retry_after(headers_map["retry-after"])
+
+        # Then check for ESI-specific reset header
+        Map.has_key?(headers_map, "x-esi-error-limit-reset") ->
+          parse_retry_after(headers_map["x-esi-error-limit-reset"])
+
+        # Fall back to nil if neither header is present
+        true ->
+          nil
       end
 
     Logger.warning("[HTTP] Rate limited, retry_after: #{retry_after_ms}ms")
@@ -392,7 +394,7 @@ defmodule WandererKills.Http.Client do
     {:error,
      Error.rate_limit_error("Rate limit exceeded", %{
        body: body,
-       retry_after: retry_after_value,
+       retry_after: headers_map["retry-after"] || headers_map["x-esi-error-limit-reset"],
        retry_after_ms: retry_after_ms
      })}
   end

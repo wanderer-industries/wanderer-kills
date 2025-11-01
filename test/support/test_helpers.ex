@@ -485,6 +485,20 @@ defmodule WandererKills.TestHelpers do
   # ============================================================================
 
   @doc """
+  Ensures the TaskSupervisor is running, starting it if needed.
+  This helper is useful in tests that require the WandererKills.TaskSupervisor.
+  """
+  def ensure_task_supervisor do
+    case Process.whereis(WandererKills.TaskSupervisor) do
+      nil ->
+        ExUnit.Callbacks.start_supervised!({Task.Supervisor, name: WandererKills.TaskSupervisor})
+
+      _pid ->
+        :ok
+    end
+  end
+
+  @doc """
   Waits for a GenServer to be registered with a given name.
   """
   def wait_for_process(name, timeout \\ 1000) do
