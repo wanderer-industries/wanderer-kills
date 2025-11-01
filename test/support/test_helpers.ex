@@ -147,22 +147,11 @@ defmodule WandererKills.TestHelpers do
       rescue
         error in [RuntimeError] ->
           # Only catch the specific "already in global mode" error
-          # Mox raises a RuntimeError with this specific message
-          case error.message do
-            "Mox is already in global mode" ->
-              :ok
-
-            message when is_binary(message) ->
-              if message =~ ~r/already (in|set to) global mode/i do
-                :ok
-              else
-                # Re-raise any other RuntimeError
-                reraise error, __STACKTRACE__
-              end
-
-            _ ->
-              # Re-raise any other RuntimeError
-              reraise error, __STACKTRACE__
+          if error.message =~ ~r/already (in|set to) global mode/i do
+            :ok
+          else
+            # Re-raise any other RuntimeError
+            reraise error, __STACKTRACE__
           end
       end
     end
@@ -515,6 +504,7 @@ defmodule WandererKills.TestHelpers do
     case Process.whereis(WandererKills.TaskSupervisor) do
       nil ->
         ExUnit.Callbacks.start_supervised!({Task.Supervisor, name: WandererKills.TaskSupervisor})
+        :ok
 
       _pid ->
         :ok
