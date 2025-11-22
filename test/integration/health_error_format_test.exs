@@ -4,15 +4,13 @@ defmodule WandererKills.HealthErrorFormatTest do
   This test simulates a health check failure scenario.
   """
 
-  use ExUnit.Case, async: false
-  import Phoenix.ConnTest
+  use WandererKills.UnifiedTestCase, async: false, type: :conn
 
   @endpoint WandererKillsWeb.Endpoint
 
-  test "health endpoint returns standardized error format on failure" do
+  test "health endpoint returns standardized error format on failure", %{conn: conn} do
     # Create a test scenario where health check might fail
     # by making a request to the health endpoint
-    conn = build_conn()
     conn = get(conn, "/api/health")
 
     # If the response is 503, verify error format

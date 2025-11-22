@@ -11,6 +11,8 @@ defmodule WandererKills.Http.Client do
   All HTTP requests in the application should go through this module.
   """
 
+  @behaviour WandererKills.Http.ClientBehaviour
+
   require Logger
 
   alias WandererKills.Core.Support.Error
@@ -47,7 +49,8 @@ defmodule WandererKills.Http.Client do
   @spec get(url, headers, options) :: response
   def get(url, headers \\ [], options \\ []) do
     # Check if we should use rate limiting
-    if should_rate_limit?(url) do
+    if should_rate_limit?(url) and
+         Application.get_env(:wanderer_kills, :features)[:smart_rate_limiting] do
       get_with_rate_limit(url, headers, options)
     else
       do_get(url, headers, options)
@@ -60,12 +63,20 @@ defmodule WandererKills.Http.Client do
   @spec get_with_rate_limit(url, headers, options) :: response
   def get_with_rate_limit(url, headers \\ [], options \\ []) do
     if Application.get_env(:wanderer_kills, :features)[:smart_rate_limiting] do
-      case SmartRateLimiter.check_rate_limit(url) do
-        :ok ->
-          do_get(url, headers, options)
+      # Use the reservation system for rate limiting
+      case SmartRateLimiter.reserve_token(url) do
+        {:ok, reservation_id} ->
+          # Perform the request
+          result = do_get(url, headers, options)
 
-        {:error, :rate_limited} ->
-          {:error, Error.http_error(:rate_limited, "Rate limit exceeded for #{url}", true)}
+          # Report the result to consume appropriate tokens
+          status_code = extract_status_from_result(result)
+          SmartRateLimiter.report_request_result(reservation_id, status_code, url)
+
+          result
+
+        {:error, error} ->
+          {:error, error}
       end
     else
       # Rate limiting disabled, proceed directly
@@ -140,7 +151,7 @@ defmodule WandererKills.Http.Client do
 
     result =
       request
-      |> Finch.request(finch_name, receive_timeout: timeout)
+      |> do_finch_request(finch_name, receive_timeout: timeout)
       |> handle_finch_response(url, start_time, headers, options, redirect_count)
 
     # Emit telemetry
@@ -178,7 +189,7 @@ defmodule WandererKills.Http.Client do
     start_time = System.monotonic_time(:millisecond)
 
     result =
-      case Finch.request(request, finch_name, receive_timeout: timeout) do
+      case do_finch_request(request, finch_name, receive_timeout: timeout) do
         {:ok, %Finch.Response{status: status, body: resp_body, headers: resp_headers}} ->
           elapsed = System.monotonic_time(:millisecond) - start_time
           Logger.debug("[HTTP] Response #{status} in #{elapsed}ms")
@@ -212,17 +223,8 @@ defmodule WandererKills.Http.Client do
   # ============================================================================
 
   defp get_finch_name do
-    # Always use WandererKills.Finch in production/dev
-    # In test environment, use a test-specific Finch
-    case Application.get_env(:wanderer_kills, :env) do
-      :test ->
-        WandererKills.Test.Finch
-
-      _ ->
-        # In production/dev, always use WandererKills.Finch
-        # Finch should be started by the application supervisor
-        WandererKills.Finch
-    end
+    # Always use WandererKills.Finch
+    WandererKills.Finch
   end
 
   defp should_rate_limit?(url) do
@@ -369,16 +371,32 @@ defmodule WandererKills.Http.Client do
   end
 
   defp handle_response(429, body, headers) do
-    # Extract retry-after header if present
-    retry_after =
-      Enum.find_value(headers, fn
-        {"retry-after", value} -> value
-        {"x-esi-error-limit-remain", value} -> value
-        _ -> nil
-      end)
+    # Extract retry-after header if present (prefer retry-after over x-esi-error-limit-reset)
+    headers_map = Map.new(headers, fn {k, v} -> {String.downcase(k), v} end)
+
+    retry_after_ms =
+      cond do
+        # First check for standard Retry-After header
+        Map.has_key?(headers_map, "retry-after") ->
+          parse_retry_after(headers_map["retry-after"])
+
+        # Then check for ESI-specific reset header
+        Map.has_key?(headers_map, "x-esi-error-limit-reset") ->
+          parse_retry_after(headers_map["x-esi-error-limit-reset"])
+
+        # Fall back to nil if neither header is present
+        true ->
+          nil
+      end
+
+    Logger.warning("[HTTP] Rate limited, retry_after: #{retry_after_ms}ms")
 
     {:error,
-     Error.rate_limit_error("Rate limit exceeded", %{body: body, retry_after: retry_after})}
+     Error.rate_limit_error("Rate limit exceeded", %{
+       body: body,
+       retry_after: headers_map["retry-after"] || headers_map["x-esi-error-limit-reset"],
+       retry_after_ms: retry_after_ms
+     })}
   end
 
   defp handle_response(status, body, _headers) when status >= 400 and status < 500 do
@@ -451,5 +469,32 @@ defmodule WandererKills.Http.Client do
       %{duration: duration},
       metadata
     )
+  end
+
+  defp extract_status_from_result({:ok, %{status: status}}), do: status
+  defp extract_status_from_result({:error, %{details: %{status: status}}}), do: status
+  defp extract_status_from_result({:error, %{meta: %{status: status}}}), do: status
+  defp extract_status_from_result({:error, _}), do: 0
+  defp extract_status_from_result(_), do: 0
+
+  defp parse_retry_after(value) when is_binary(value) do
+    # Try to parse as integer seconds
+    case Integer.parse(value) do
+      {seconds, _} ->
+        seconds * 1000
+
+      _ ->
+        # Try to parse as HTTP date
+        # For now, default to 5 seconds
+        5000
+    end
+  end
+
+  defp parse_retry_after(value) when is_integer(value), do: value * 1000
+  defp parse_retry_after(_), do: 5000
+
+  # Helper to make Finch requests
+  defp do_finch_request(request, finch_name, options) do
+    Finch.request(request, finch_name, options)
   end
 end

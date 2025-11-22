@@ -1,37 +1,10 @@
 defmodule WandererKills.Integration.EventStreamingTest do
-  use ExUnit.Case, async: false
-
-  import Phoenix.ChannelTest
+  use WandererKills.UnifiedTestCase, async: false, type: :channel, clear_subscriptions: true
 
   alias WandererKills.Core.Storage.KillmailStore
-  alias WandererKills.Subs.SimpleSubscriptionManager
-
-  @endpoint WandererKillsWeb.Endpoint
 
   setup do
-    # Setup mocks for HTTP client
-    WandererKills.TestHelpers.setup_mocks()
-
-    # Clear all caches and tables
-    WandererKills.TestHelpers.clear_all_caches()
-    WandererKills.TestHelpers.clear_ets_tables()
-
-    # Ensure TaskSupervisor is started
-    case Process.whereis(WandererKills.TaskSupervisor) do
-      nil -> start_supervised!({Task.Supervisor, name: WandererKills.TaskSupervisor})
-      _pid -> :ok
-    end
-
-    # Ensure SimpleSubscriptionManager is started
-    case Process.whereis(SimpleSubscriptionManager) do
-      nil -> start_supervised!(SimpleSubscriptionManager)
-      _pid -> :ok
-    end
-
-    # Clear any existing subscriptions
-    SimpleSubscriptionManager.clear_all_subscriptions()
-
-    # Connect to socket without using the unified test case
+    # Connect to socket
     {:ok, socket} = connect(WandererKillsWeb.UserSocket, %{})
 
     {:ok, _, socket} =

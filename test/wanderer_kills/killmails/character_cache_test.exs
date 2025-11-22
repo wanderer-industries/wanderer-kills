@@ -1,5 +1,5 @@
 defmodule WandererKills.Ingest.Killmails.CharacterCacheTest do
-  use WandererKills.DataCase, async: false
+  use WandererKills.UnifiedTestCase, async: false, type: :integration
 
   alias WandererKills.Ingest.Killmails.CharacterCache
 

@@ -2,7 +2,7 @@ defmodule WandererKills.UnifiedTestCaseValidationTest do
   # Test various configurations of the unified test case
 
   defmodule BasicTest do
-    use WandererKills.UnifiedTestCase
+    use WandererKills.UnifiedTestCase, mocks: false
 
     test "basic test works", %{test_id: test_id} do
       assert is_integer(test_id)
@@ -18,7 +18,7 @@ defmodule WandererKills.UnifiedTestCaseValidationTest do
   end
 
   defmodule IntegrationTest do
-    use WandererKills.UnifiedTestCase, type: :integration
+    use WandererKills.UnifiedTestCase, type: :integration, mocks: false
 
     test "integration test provides extra context", context do
       assert Map.has_key?(context, :killmail_data)

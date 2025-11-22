@@ -1,5 +1,5 @@
 defmodule WandererKills.Ingest.Killmails.StoreTest do
-  use WandererKills.TestCase
+  use WandererKills.UnifiedTestCase, async: false, type: :integration
 
   alias WandererKills.Core.Storage.KillmailStore
   alias WandererKills.TestHelpers

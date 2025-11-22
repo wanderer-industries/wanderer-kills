@@ -1,6 +1,5 @@
 .env
 *.local.env
-
 .direnv/
 .cache/
 .nix-shell/
@@ -34,4 +33,5 @@ logs.txt
 # Temporary files, for example, from tests.
 /tmp/
 .claude
+CLAUDE.md
 node_modules/

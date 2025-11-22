@@ -1,7 +1,6 @@
 defmodule WandererKills.Ingest.Killmails.UnifiedProcessorPropertyTest do
-  use ExUnit.Case
+  use WandererKills.UnifiedTestCase
   use ExUnitProperties
-  use WandererKills.TestCase
 
   @moduletag :property
   @moduletag area: :killmail_processing

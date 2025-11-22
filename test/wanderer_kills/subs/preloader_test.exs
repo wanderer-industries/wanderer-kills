@@ -1,5 +1,5 @@
 defmodule WandererKills.Subs.PreloaderTest do
-  use WandererKills.DataCase, async: true
+  use WandererKills.UnifiedTestCase, async: false
 
   alias WandererKills.Subs.Preloader
 

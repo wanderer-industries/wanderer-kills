@@ -7,6 +7,10 @@ defmodule WandererKillsWeb.SubscriptionControllerTest do
   alias WandererKills.Subs.{CharacterIndex, SystemIndex}
 
   setup_all do
+    # Ensure indexes are initialized before clearing them
+    CharacterIndex.init()
+    SystemIndex.init()
+
     # Clear caches and indexes once for all tests (expensive operations)
     WandererKills.TestHelpers.clear_all_caches()
     CharacterIndex.clear()

@@ -1,5 +1,5 @@
 defmodule WandererKills.Ingest.Killmails.BatchProcessorTest do
-  use WandererKills.DataCase, async: false
+  use WandererKills.UnifiedTestCase, async: false
 
   alias WandererKills.Domain.Killmail
   alias WandererKills.Ingest.Killmails.BatchProcessor

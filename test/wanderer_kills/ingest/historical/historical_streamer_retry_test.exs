@@ -1,6 +1,7 @@
 defmodule WandererKills.Ingest.Historical.HistoricalStreamerRetryTest do
   use WandererKills.DataCase, async: false
   import Mox
+  import WandererKills.TestHelpers
 
   alias WandererKills.Ingest.Historical.HistoricalStreamer
   alias WandererKills.Ingest.Killmails.ZkbClient.Mock, as: ZkbClientMock
@@ -28,6 +29,9 @@ defmodule WandererKills.Ingest.Historical.HistoricalStreamerRetryTest do
   end
 
   setup do
+    # Ensure TaskSupervisor is running
+    ensure_task_supervisor()
+
     # Set up mox for cross-process calls
     set_mox_global()
 

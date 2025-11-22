@@ -1,5 +1,5 @@
 defmodule WandererKills.Core.Observability.TelemetryMetricsTest do
-  use ExUnit.Case, async: false
+  use WandererKills.UnifiedTestCase, async: false, mocks: false
 
   alias WandererKills.Core.Observability.Telemetry
 
@@ -19,7 +19,11 @@ defmodule WandererKills.Core.Observability.TelemetryMetricsTest do
 
     on_exit(fn ->
       # Reset metrics after each test to prevent state leakage
-      Telemetry.reset_metrics_with_tasks()
+      try do
+        Telemetry.reset_metrics_with_tasks()
+      rescue
+        _ -> :ok
+      end
     end)
 
     :ok
@@ -34,8 +38,8 @@ defmodule WandererKills.Core.Observability.TelemetryMetricsTest do
         %{task_name: "test_task"}
       )
 
-      # Give time for async cast to process
-      Process.sleep(10)
+      # Wait for async cast to process by checking state
+      :sys.get_state(Telemetry)
 
       metrics = Telemetry.get_metrics()
       assert metrics[:tasks_started] == 1
@@ -49,8 +53,8 @@ defmodule WandererKills.Core.Observability.TelemetryMetricsTest do
         %{task_name: "test_task"}
       )
 
-      # Give time for async cast to process
-      Process.sleep(10)
+      # Wait for async cast to process by checking state
+      :sys.get_state(Telemetry)
 
       metrics = Telemetry.get_metrics()
       assert metrics[:tasks_completed] == 1
@@ -64,8 +68,8 @@ defmodule WandererKills.Core.Observability.TelemetryMetricsTest do
         %{task_name: "test_task", error: "Test error"}
       )
 
-      # Give time for async cast to process
-      Process.sleep(10)
+      # Wait for async cast to process by checking state
+      :sys.get_state(Telemetry)
 
       metrics = Telemetry.get_metrics()
       assert metrics[:tasks_failed] == 1
@@ -88,8 +92,8 @@ defmodule WandererKills.Core.Observability.TelemetryMetricsTest do
         %{task_name: "subscription_preload"}
       )
 
-      # Give time for async cast to process
-      Process.sleep(10)
+      # Wait for async cast to process by checking state
+      :sys.get_state(Telemetry)
 
       metrics = Telemetry.get_metrics()
       assert metrics[:preload_tasks_started] == 1
@@ -111,8 +115,8 @@ defmodule WandererKills.Core.Observability.TelemetryMetricsTest do
         %{task_name: "subscription_preload", error: "Test error"}
       )
 
-      # Give time for async cast to process
-      Process.sleep(10)
+      # Wait for async cast to process by checking state
+      :sys.get_state(Telemetry)
 
       metrics = Telemetry.get_metrics()
       assert metrics[:preload_tasks_started] == 1
@@ -135,8 +139,8 @@ defmodule WandererKills.Core.Observability.TelemetryMetricsTest do
         %{task_name: "webhook_notification"}
       )
 
-      # Give time for async cast to process
-      Process.sleep(10)
+      # Wait for async cast to process by checking state
+      :sys.get_state(Telemetry)
 
       metrics = Telemetry.get_metrics()
       assert metrics[:webhook_tasks_started] == 1
@@ -158,8 +162,8 @@ defmodule WandererKills.Core.Observability.TelemetryMetricsTest do
         %{task_name: "send_webhook_notifications", error: "Test error"}
       )
 
-      # Give time for async cast to process
-      Process.sleep(10)
+      # Wait for async cast to process by checking state
+      :sys.get_state(Telemetry)
 
       metrics = Telemetry.get_metrics()
       assert metrics[:webhook_tasks_failed] == 1
@@ -181,8 +185,8 @@ defmodule WandererKills.Core.Observability.TelemetryMetricsTest do
         %{task_name: "test"}
       )
 
-      # Give time for async cast to process
-      Process.sleep(10)
+      # Wait for async cast to process by checking state
+      :sys.get_state(Telemetry)
 
       metrics = Telemetry.get_metrics()
       assert is_map(metrics)
@@ -200,8 +204,8 @@ defmodule WandererKills.Core.Observability.TelemetryMetricsTest do
         %{task_name: "test"}
       )
 
-      # Give time for async cast to process
-      Process.sleep(10)
+      # Wait for async cast to process by checking state
+      :sys.get_state(Telemetry)
 
       metrics = Telemetry.get_metrics()
       assert metrics[:tasks_started] == 1
@@ -209,8 +213,8 @@ defmodule WandererKills.Core.Observability.TelemetryMetricsTest do
       # Reset with task initialization
       Telemetry.reset_metrics_with_tasks()
 
-      # Give time for async cast to process
-      Process.sleep(10)
+      # Wait for async cast to process by checking state
+      :sys.get_state(Telemetry)
 
       # Check all counters are back to 0
       metrics = Telemetry.get_metrics()

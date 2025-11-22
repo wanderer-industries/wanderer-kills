@@ -1,5 +1,5 @@
 defmodule WandererKills.Ingest.Killmails.StoreEventStreamingTest do
-  use WandererKills.TestCase
+  use WandererKills.UnifiedTestCase, async: false
 
   alias WandererKills.Core.Storage.KillmailStore
 
@@ -36,60 +36,26 @@ defmodule WandererKills.Ingest.Killmails.StoreEventStreamingTest do
 
   # Test setup is handled by UnifiedTestCase
 
-  setup :ensure_event_streaming_tables
-
-  defp ensure_event_streaming_tables(_context) do
+  setup do
     # Ensure event streaming is enabled before table initialization
+    original_config = Application.get_env(:wanderer_kills, :storage)
     Application.put_env(:wanderer_kills, :storage, enable_event_streaming: true)
 
-    # Ensure PubSub is started
-    case Process.whereis(WandererKills.PubSub) do
-      nil ->
-        # Start PubSub if not running
-        start_supervised!({Phoenix.PubSub, name: WandererKills.PubSub})
-
-      _pid ->
-        # PubSub already running
-        :ok
-    end
-
-    # Check if event streaming tables exist, if not create them
-    tables_to_check = [:killmail_events, :client_offsets, :counters]
-
-    Enum.each(tables_to_check, fn table ->
-      ensure_table_exists(table)
-    end)
+    # The application should have already started and initialized tables.
+    # We just need to ensure event streaming tables are available.
+    # If they're not, it means the application started without event streaming enabled,
+    # so we need to create them manually.
+    KillmailStore.init_tables!()
 
     on_exit(fn ->
-      Application.delete_env(:wanderer_kills, :storage)
+      if original_config do
+        Application.put_env(:wanderer_kills, :storage, original_config)
+      else
+        Application.delete_env(:wanderer_kills, :storage)
+      end
     end)
 
     :ok
-  end
-
-  defp ensure_table_exists(table) do
-    case :ets.info(table) do
-      :undefined ->
-        create_table(table)
-
-      _ ->
-        # Table already exists
-        :ok
-    end
-  end
-
-  defp create_table(:killmail_events) do
-    :ets.new(:killmail_events, [:ordered_set, :named_table, :public, {:read_concurrency, true}])
-  end
-
-  defp create_table(:client_offsets) do
-    :ets.new(:client_offsets, [:set, :named_table, :public, {:read_concurrency, true}])
-  end
-
-  defp create_table(:counters) do
-    :ets.new(:counters, [:set, :named_table, :public, {:read_concurrency, true}])
-    :ets.insert(:counters, {:event_counter, 0})
-    :ets.insert(:counters, {:killmail_seq, 0})
   end
 
   describe "event streaming - insert_event/2" do

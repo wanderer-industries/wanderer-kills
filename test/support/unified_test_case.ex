@@ -28,6 +28,7 @@ defmodule WandererKills.UnifiedTestCase do
   """
 
   use ExUnit.CaseTemplate
+  require Logger
 
   alias WandererKills.TestFactory
 
@@ -109,6 +110,9 @@ defmodule WandererKills.UnifiedTestCase do
     unique_id = System.unique_integer([:positive])
     Process.put(:test_unique_id, unique_id)
 
+    # Ensure application is started
+    ensure_application_started()
+
     # Perform setup operations
     perform_setup_operations(context, opts)
 
@@ -119,7 +123,24 @@ defmodule WandererKills.UnifiedTestCase do
     add_type_specific_context(base_context, opts[:type])
   end
 
+  defp ensure_application_started do
+    case Application.ensure_all_started(:wanderer_kills) do
+      {:ok, _} ->
+        :ok
+
+      {:error, {:wanderer_kills, {:already_started, _}}} ->
+        :ok
+
+      error ->
+        Logger.warning("Failed to ensure application started: #{inspect(error)}")
+        :ok
+    end
+  end
+
   defp perform_setup_operations(context, opts) do
+    # Ensure ETS tables are initialized
+    ensure_ets_tables_initialized()
+
     # Configure mox mode
     unless opts[:mox_mode] == :global do
       # Private mode is the default in ExUnit
@@ -150,14 +171,23 @@ defmodule WandererKills.UnifiedTestCase do
     end
 
     # Clear all subscriptions if requested
-    if opts[:clear_subscriptions] do
+    if opts[:clear_subscriptions] && Process.whereis(SimpleSubscriptionManager) do
       safe_clear(fn -> SimpleSubscriptionManager.clear_all_subscriptions() end)
     end
+
+    # Small delay to ensure cleanup is complete before next test
+    :timer.sleep(1)
   end
 
   defp add_type_specific_context(base_context, type) do
     case type do
       :conn ->
+        # Ensure endpoint is initialized before building conn
+        endpoint = WandererKillsWeb.Endpoint
+
+        # Wait for endpoint ETS table to be ready
+        wait_for_ets_table(endpoint, 100)
+
         Map.put(base_context, :conn, Phoenix.ConnTest.build_conn())
 
       :channel ->
@@ -181,5 +211,57 @@ defmodule WandererKills.UnifiedTestCase do
     fun.()
   rescue
     _ -> :ok
+  catch
+    :exit, _ -> :ok
+  end
+
+  # Helper to wait for an ETS table to exist
+  defp wait_for_ets_table(table, timeout_ms) do
+    wait_for_ets_table_loop(table, timeout_ms, System.monotonic_time(:millisecond))
+  end
+
+  defp wait_for_ets_table_loop(table, timeout_ms, start_time) do
+    if :ets.info(table) != :undefined do
+      :ok
+    else
+      current_time = System.monotonic_time(:millisecond)
+
+      if current_time - start_time >= timeout_ms do
+        raise "Timeout waiting for ETS table #{inspect(table)}"
+      else
+        :timer.sleep(5)
+        wait_for_ets_table_loop(table, timeout_ms, start_time)
+      end
+    end
+  end
+
+  # Ensure ETS tables are initialized before tests run
+  defp ensure_ets_tables_initialized do
+    # The application should already be started by test_helper.exs
+    # and tables should be initialized by application.ex
+    # We just need to ensure subscription indexes are available
+    ensure_subscription_indexes_initialized()
+  end
+
+  defp ensure_subscription_indexes_initialized do
+    alias WandererKills.Subs.{CharacterIndex, SystemIndex}
+
+    # Ensure CharacterIndex is initialized
+    if :ets.info(:character_subscription_index) == :undefined do
+      try do
+        CharacterIndex.init()
+      rescue
+        _ -> :ok
+      end
+    end
+
+    # Ensure SystemIndex is initialized
+    if :ets.info(:system_subscription_index) == :undefined do
+      try do
+        SystemIndex.init()
+      rescue
+        _ -> :ok
+      end
+    end
   end
 end

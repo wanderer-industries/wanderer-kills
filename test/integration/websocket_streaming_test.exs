@@ -1,35 +1,9 @@
 defmodule WandererKills.Integration.WebSocketStreamingTest do
-  use ExUnit.Case, async: false
+  use WandererKills.UnifiedTestCase, async: false, type: :channel, clear_subscriptions: true
 
-  import Phoenix.ChannelTest
-  alias WandererKills.Subs.SimpleSubscriptionManager
   alias WandererKillsWeb.KillmailChannel
 
-  @endpoint WandererKillsWeb.Endpoint
-
   setup do
-    # Setup mocks for HTTP client
-    WandererKills.TestHelpers.setup_mocks()
-
-    # Clear all caches and subscription-specific tables only
-    WandererKills.TestHelpers.clear_all_caches()
-    WandererKills.TestHelpers.clear_subscription_ets_tables()
-
-    # Ensure TaskSupervisor is started
-    case Process.whereis(WandererKills.TaskSupervisor) do
-      nil -> start_supervised!({Task.Supervisor, name: WandererKills.TaskSupervisor})
-      _pid -> :ok
-    end
-
-    # Ensure SimpleSubscriptionManager is started
-    case Process.whereis(SimpleSubscriptionManager) do
-      nil -> start_supervised!(SimpleSubscriptionManager)
-      _pid -> :ok
-    end
-
-    # Clear any existing subscriptions
-    SimpleSubscriptionManager.clear_all_subscriptions()
-
     # Connect to socket and join channel
     {:ok, socket} = connect(WandererKillsWeb.UserSocket, %{})
     {:ok, _, socket} = subscribe_and_join(socket, KillmailChannel, "killmails:lobby")

@@ -31,6 +31,9 @@ defmodule WandererKills.Ingest.SmartRateLimiter do
     bulk: 5
   }
 
+  # Default reservation cleanup timeout in milliseconds
+  @default_cleanup_timeout 60_000
+
   defmodule State do
     @moduledoc "Internal state for SmartRateLimiter GenServer"
     defstruct [
@@ -39,6 +42,15 @@ defmodule WandererKills.Ingest.SmartRateLimiter do
 
       # Simple mode state (backward compatible with RateLimiter)
       service_buckets: %{},
+      # Track reservations for post-request token consumption
+      reservations: %{},
+      # ESI token costs by status code
+      esi_token_costs: %{
+        "2xx" => 2,
+        "3xx" => 1,
+        "4xx" => 5,
+        "5xx" => 0
+      },
 
       # Advanced mode state
       # Request queue (priority queue)
@@ -101,20 +113,13 @@ defmodule WandererKills.Ingest.SmartRateLimiter do
 
   Returns :ok if a token was available, {:error, _} otherwise.
   """
-  @spec check_rate_limit(:zkillboard | :esi) :: :ok | {:error, Error.t()}
+  @spec check_rate_limit(:zkillboard | :esi | String.t()) :: :ok | {:error, Error.t()}
   def check_rate_limit(service) when service in [:zkillboard, :esi] do
     GenServer.call(__MODULE__, {:consume_token, service})
   end
 
-  @spec check_rate_limit(String.t()) :: :ok | {:error, :rate_limited}
   def check_rate_limit(url) when is_binary(url) do
-    service =
-      cond do
-        String.contains?(url, "zkillboard.com") -> :zkillboard
-        String.contains?(url, "zkillredisq.stream") -> :zkillboard
-        String.contains?(url, "esi.evetech.net") -> :esi
-        true -> nil
-      end
+    service = determine_service(url)
 
     if service do
       case check_rate_limit(service) do
@@ -126,6 +131,49 @@ defmodule WandererKills.Ingest.SmartRateLimiter do
       :ok
     end
   end
+
+  @doc """
+  Reserve a token for a request. Used for pre-flight checks.
+  Returns a reservation ID that must be used when reporting the result.
+  """
+  @spec reserve_token(:zkillboard | :esi | String.t()) :: {:ok, String.t()} | {:error, Error.t()}
+  def reserve_token(service_or_url) do
+    service = determine_service(service_or_url)
+
+    if service do
+      GenServer.call(__MODULE__, {:reserve_token, service})
+    else
+      # Unknown service, no rate limiting needed
+      {:ok, "no-reservation-needed"}
+    end
+  end
+
+  @doc """
+  Report the result of a request and consume appropriate tokens based on status code.
+  For ESI: 2XX = 2 tokens, 3XX = 1 token, 4XX = 5 tokens, 5XX = 0 tokens
+  For ZKB: Always 1 token regardless of status
+  """
+  @spec report_request_result(String.t(), integer(), :zkillboard | :esi | String.t()) :: :ok
+  def report_request_result(reservation_id, status_code, service_or_url) do
+    if reservation_id == "no-reservation-needed" do
+      :ok
+    else
+      service = determine_service(service_or_url)
+      GenServer.cast(__MODULE__, {:report_result, reservation_id, status_code, service})
+    end
+  end
+
+  # Helper to determine service from URL
+  defp determine_service(url) when is_binary(url) do
+    cond do
+      String.contains?(url, "zkillboard.com") -> :zkillboard
+      String.contains?(url, "zkillredisq.stream") -> :zkillboard
+      String.contains?(url, "esi.evetech.net") -> :esi
+      true -> nil
+    end
+  end
+
+  defp determine_service(service) when is_atom(service), do: service
 
   @doc """
   Gets the current state of a bucket (simple mode, for monitoring/debugging).
@@ -205,8 +253,8 @@ defmodule WandererKills.Ingest.SmartRateLimiter do
 
     zkb_capacity = app_config[:zkb_capacity] || Keyword.get(opts, :zkb_capacity, 10)
     zkb_refill_rate = app_config[:zkb_refill_rate] || Keyword.get(opts, :zkb_refill_rate, 10)
-    esi_capacity = app_config[:esi_capacity] || Keyword.get(opts, :esi_capacity, 100)
-    esi_refill_rate = app_config[:esi_refill_rate] || Keyword.get(opts, :esi_refill_rate, 100)
+    esi_capacity = app_config[:esi_capacity] || Keyword.get(opts, :esi_capacity, 500)
+    esi_refill_rate = app_config[:esi_refill_rate] || Keyword.get(opts, :esi_refill_rate, 3000)
 
     service_buckets = %{
       zkillboard: %{
@@ -226,6 +274,13 @@ defmodule WandererKills.Ingest.SmartRateLimiter do
     state = %State{
       mode: :simple,
       service_buckets: service_buckets,
+      reservations: %{},
+      esi_token_costs: %{
+        "2xx" => 2,
+        "3xx" => 1,
+        "4xx" => 5,
+        "5xx" => 0
+      },
       config: %{
         zkb_capacity: zkb_capacity,
         zkb_refill_rate: zkb_refill_rate,
@@ -289,6 +344,10 @@ defmodule WandererKills.Ingest.SmartRateLimiter do
 
   def handle_call({:consume_token, service}, _from, %{mode: :simple} = state) do
     handle_simple_token_consumption(service, state)
+  end
+
+  def handle_call({:reserve_token, service}, _from, %{mode: :simple} = state) do
+    handle_simple_token_reservation(service, state)
   end
 
   def handle_call({:get_bucket_state, service}, _from, %{mode: :simple} = state) do
@@ -363,7 +422,16 @@ defmodule WandererKills.Ingest.SmartRateLimiter do
         }
 
         new_buckets = Map.put(state.service_buckets, service, updated_bucket)
-        new_state = %{state | service_buckets: new_buckets}
+
+        # Clear all reservations for this service
+        new_reservations =
+          state.reservations
+          |> Enum.reject(fn {_id, reservation} ->
+            reservation.service == service
+          end)
+          |> Enum.into(%{})
+
+        new_state = %{state | service_buckets: new_buckets, reservations: new_reservations}
 
         Logger.info("[SmartRateLimiter] Simple mode bucket reset",
           service: service,
@@ -372,6 +440,13 @@ defmodule WandererKills.Ingest.SmartRateLimiter do
 
         {:noreply, new_state}
     end
+  end
+
+  def handle_cast(
+        {:report_result, reservation_id, status_code, service},
+        %{mode: :simple} = state
+      ) do
+    handle_simple_report_result(reservation_id, status_code, service, state)
   end
 
   def handle_cast({:request_complete, request_id, result}, %{mode: :advanced} = state) do
@@ -411,6 +486,12 @@ defmodule WandererKills.Ingest.SmartRateLimiter do
     Process.send_after(self(), :refill_tokens, 1_000)
 
     {:noreply, new_state}
+  end
+
+  def handle_info({:cleanup_reservation, reservation_id}, %{mode: :simple} = state) do
+    # Remove expired reservation
+    new_reservations = Map.delete(state.reservations, reservation_id)
+    {:noreply, %{state | reservations: new_reservations}}
   end
 
   def handle_info(:refill_tokens, %{mode: :advanced} = state) do
@@ -457,6 +538,164 @@ defmodule WandererKills.Ingest.SmartRateLimiter do
   ## Private Functions
 
   # Simple mode functions (backward compatible with RateLimiter)
+
+  defp handle_simple_token_reservation(service, state) do
+    bucket = Map.get(state.service_buckets, service)
+
+    # For reservations, we check if we have at least the maximum possible tokens
+    # ESI max is 5 tokens (for 4xx responses), ZKB is 1 token
+    required_tokens = if service == :esi, do: 5.0, else: 1.0
+
+    # Calculate available tokens accounting for existing reservations
+    available_tokens =
+      if bucket do
+        reserved_tokens =
+          state.reservations
+          |> Map.values()
+          |> Enum.reduce(0.0, fn
+            %{service: ^service, reserved_tokens: reservation_tokens}, acc ->
+              acc + reservation_tokens
+
+            _, acc ->
+              acc
+          end)
+
+        bucket.tokens - reserved_tokens
+      else
+        0.0
+      end
+
+    if bucket && available_tokens >= required_tokens do
+      # Create reservation
+      reservation_id = generate_reservation_id()
+
+      reservation = %{
+        service: service,
+        created_at: System.monotonic_time(:millisecond),
+        reserved_tokens: required_tokens
+      }
+
+      new_reservations = Map.put(state.reservations, reservation_id, reservation)
+      new_state = %{state | reservations: new_reservations}
+
+      # Set a timeout to clean up reservation if not used
+      cleanup_timeout = get_cleanup_timeout()
+      Process.send_after(self(), {:cleanup_reservation, reservation_id}, cleanup_timeout)
+
+      {:reply, {:ok, reservation_id}, new_state}
+    else
+      tokens_available = max(available_tokens, 0.0)
+
+      Logger.warning("[SmartRateLimiter] Cannot reserve tokens",
+        service: service,
+        required: required_tokens,
+        available: tokens_available
+      )
+
+      {:reply,
+       {:error,
+        Error.rate_limit_error("Insufficient tokens for reservation", %{
+          service: service,
+          tokens_available: tokens_available,
+          tokens_required: required_tokens
+        })}, state}
+    end
+  end
+
+  defp handle_simple_report_result(reservation_id, status_code, service, state) do
+    case Map.pop(state.reservations, reservation_id) do
+      {nil, _} ->
+        # Reservation not found, might have been cleaned up
+        {:noreply, state}
+
+      {reservation, new_reservations} ->
+        # Validate service matches the reservation
+        actual_service =
+          if reservation.service != service do
+            Logger.error("[SmartRateLimiter] Service mismatch in reservation",
+              reservation_id: reservation_id,
+              reservation_service: reservation.service,
+              reported_service: service,
+              status_code: status_code
+            )
+
+            # Use the original reservation service for token consumption
+            reservation.service
+          else
+            service
+          end
+
+        # Calculate actual tokens to consume using the validated service
+        tokens_to_consume = calculate_tokens_to_consume(actual_service, status_code, state)
+
+        # Update bucket using the validated service
+        bucket = Map.get(state.service_buckets, actual_service)
+
+        if bucket do
+          # Consume the calculated tokens (not the reserved amount)
+          updated_bucket = %{bucket | tokens: max(0, bucket.tokens - tokens_to_consume)}
+          new_buckets = Map.put(state.service_buckets, actual_service, updated_bucket)
+
+          # Log token consumption
+          Logger.debug("[SmartRateLimiter] Consumed tokens",
+            service: actual_service,
+            status_code: status_code,
+            tokens_consumed: tokens_to_consume,
+            tokens_remaining: updated_bucket.tokens
+          )
+
+          # Emit telemetry
+          :telemetry.execute(
+            [:wanderer_kills, :rate_limiter, :token_consumed],
+            %{
+              tokens_consumed: tokens_to_consume,
+              tokens_remaining: updated_bucket.tokens
+            },
+            %{
+              service: actual_service,
+              status_code: status_code
+            }
+          )
+
+          new_state = %{
+            state
+            | service_buckets: new_buckets,
+              reservations: new_reservations
+          }
+
+          {:noreply, new_state}
+        else
+          # Service bucket not found
+          {:noreply, %{state | reservations: new_reservations}}
+        end
+    end
+  end
+
+  defp calculate_tokens_to_consume(:esi, status_code, state) do
+    # ESI uses different token costs based on status code
+    cond do
+      status_code >= 200 and status_code < 300 -> Map.get(state.esi_token_costs, "2xx", 2)
+      status_code >= 300 and status_code < 400 -> Map.get(state.esi_token_costs, "3xx", 1)
+      status_code >= 400 and status_code < 500 -> Map.get(state.esi_token_costs, "4xx", 5)
+      status_code >= 500 -> Map.get(state.esi_token_costs, "5xx", 0)
+      # Default fallback
+      true -> 1
+    end
+  end
+
+  defp calculate_tokens_to_consume(_, _, _) do
+    # Non-ESI services always consume 1 token
+    1
+  end
+
+  defp generate_reservation_id do
+    :crypto.strong_rand_bytes(8) |> Base.url_encode64(padding: false)
+  end
+
+  defp get_cleanup_timeout do
+    app_config = Application.get_env(:wanderer_kills, :smart_rate_limiter, [])
+    Keyword.get(app_config, :reservation_cleanup_timeout_ms, @default_cleanup_timeout)
+  end
 
   defp handle_simple_token_consumption(service, state) do
     bucket = Map.get(state.service_buckets, service)

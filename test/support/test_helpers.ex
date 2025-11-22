@@ -135,8 +135,26 @@ defmodule WandererKills.TestHelpers do
   Sets up common mocks for testing.
   """
   def setup_mocks do
-    # Set mocks to global mode to allow calls from any process
-    Mox.set_mox_global()
+    # Set global mode if not already set
+    if function_exported?(Mox, :global_mode?, 0) do
+      unless Mox.global_mode?() do
+        Mox.set_mox_global()
+      end
+    else
+      # Fallback: try to set global mode, rescue only the specific error
+      try do
+        Mox.set_mox_global()
+      rescue
+        error in [RuntimeError] ->
+          # Only catch the specific "already in global mode" error
+          if error.message =~ ~r/already (in|set to) global mode/i do
+            :ok
+          else
+            # Re-raise any other RuntimeError
+            reraise error, __STACKTRACE__
+          end
+      end
+    end
 
     setup_http_client_mocks()
     setup_esi_client_mocks()
@@ -477,6 +495,21 @@ defmodule WandererKills.TestHelpers do
   # ============================================================================
   # Process Helpers
   # ============================================================================
+
+  @doc """
+  Ensures the TaskSupervisor is running, starting it if needed.
+  This helper is useful in tests that require the WandererKills.TaskSupervisor.
+  """
+  def ensure_task_supervisor do
+    case Process.whereis(WandererKills.TaskSupervisor) do
+      nil ->
+        ExUnit.Callbacks.start_supervised!({Task.Supervisor, name: WandererKills.TaskSupervisor})
+        :ok
+
+      _pid ->
+        :ok
+    end
+  end
 
   @doc """
   Waits for a GenServer to be registered with a given name.

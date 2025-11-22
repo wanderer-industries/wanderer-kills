@@ -1,7 +1,8 @@
 # Start ExUnit first
 ExUnit.start()
 
-# Start the application which will load all other dependencies
+# Ensure the application is started before any tests run
+# This is critical for integration tests that rely on supervisors
 {:ok, _} = Application.ensure_all_started(:wanderer_kills)
 
 # Ensure Mox is available and define mocks conditionally

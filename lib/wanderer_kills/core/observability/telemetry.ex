@@ -3,7 +3,7 @@ defmodule WandererKills.Core.Observability.Telemetry do
   Consolidated telemetry system for WandererKills.
 
   This module combines telemetry event handling, metrics aggregation, batch processing
-  telemetry, and task tracking from telemetry_metrics.ex into a single cohesive system. 
+  telemetry, and task tracking from telemetry_metrics.ex into a single cohesive system.
   It provides:
 
   - Event execution and handler management
@@ -226,6 +226,42 @@ defmodule WandererKills.Core.Observability.Telemetry do
       [:wanderer_kills, :websocket, :subscription],
       %{count: 1},
       Map.merge(metadata, %{event: event, subscription_id: subscription_id})
+    )
+  end
+
+  @doc "Rate limiter token consumption event"
+  @spec rate_limiter_consumed(atom(), integer(), integer(), integer()) :: :ok
+  def rate_limiter_consumed(service, tokens_consumed, tokens_remaining, status_code) do
+    :telemetry.execute(
+      [:wanderer_kills, :rate_limiter, :token_consumed],
+      %{
+        tokens_consumed: tokens_consumed,
+        tokens_remaining: tokens_remaining
+      },
+      %{
+        service: service,
+        status_code: status_code
+      }
+    )
+  end
+
+  @doc "Rate limiter exceeded event"
+  @spec rate_limiter_exceeded(atom(), float()) :: :ok
+  def rate_limiter_exceeded(service, tokens_available) do
+    :telemetry.execute(
+      [:wanderer_kills, :rate_limiter, :rate_limited],
+      %{tokens_available: tokens_available},
+      %{service: service}
+    )
+  end
+
+  @doc "Rate limiter reservation event"
+  @spec rate_limiter_reserved(atom(), String.t(), float()) :: :ok
+  def rate_limiter_reserved(service, reservation_id, reserved_tokens) do
+    :telemetry.execute(
+      [:wanderer_kills, :rate_limiter, :token_reserved],
+      %{reserved_tokens: reserved_tokens},
+      %{service: service, reservation_id: reservation_id}
     )
   end
 
@@ -498,7 +534,10 @@ defmodule WandererKills.Core.Observability.Telemetry do
         [:wanderer_kills, :parser, :stored],
         [:wanderer_kills, :parser, :skipped],
         [:wanderer_kills, :websocket, :kills_sent],
-        [:wanderer_kills, :sse, :event, :sent]
+        [:wanderer_kills, :sse, :event, :sent],
+        [:wanderer_kills, :rate_limiter, :token_consumed],
+        [:wanderer_kills, :rate_limiter, :rate_limited],
+        [:wanderer_kills, :rate_limiter, :token_reserved]
       ],
       &__MODULE__.handle_metric_event/4,
       nil
@@ -550,6 +589,9 @@ defmodule WandererKills.Core.Observability.Telemetry do
 
       [:wanderer_kills, :sse | _rest] = sse_event ->
         handle_sse_event(sse_event, measurements, metadata, config)
+
+      [:wanderer_kills, :rate_limiter | _rest] = rl_event ->
+        handle_rate_limiter_event(rl_event, measurements, metadata, config)
 
       _ ->
         :ok
@@ -628,6 +670,35 @@ defmodule WandererKills.Core.Observability.Telemetry do
     case event do
       [:wanderer_kills, :sse, :event, :sent] ->
         increment_counter(:sse_events_sent)
+
+      _ ->
+        :ok
+    end
+  end
+
+  defp handle_rate_limiter_event(event, measurements, metadata, _config) do
+    case event do
+      [:wanderer_kills, :rate_limiter, :token_consumed] ->
+        service = metadata[:service]
+        status_code = metadata[:status_code]
+        tokens_consumed = measurements[:tokens_consumed]
+
+        # Track tokens consumed by service and status code
+        increment_counter("rate_limiter_#{service}_tokens_consumed", tokens_consumed)
+        increment_counter("rate_limiter_#{service}_#{status_code}_requests")
+
+        # Update remaining tokens gauge
+        if tokens_remaining = measurements[:tokens_remaining] do
+          set_gauge("rate_limiter_#{service}_tokens_remaining", tokens_remaining)
+        end
+
+      [:wanderer_kills, :rate_limiter, :rate_limited] ->
+        service = metadata[:service]
+        increment_counter("rate_limiter_#{service}_violations")
+
+      [:wanderer_kills, :rate_limiter, :token_reserved] ->
+        service = metadata[:service]
+        increment_counter("rate_limiter_#{service}_reservations")
 
       _ ->
         :ok

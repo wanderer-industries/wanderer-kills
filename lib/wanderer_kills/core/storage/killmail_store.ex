@@ -2,7 +2,7 @@ defmodule WandererKills.Core.Storage.KillmailStore do
   @moduledoc """
   Unified ETS-backed killmail storage with optional event streaming support.
 
-  This module consolidates the functionality of both the basic Store and 
+  This module consolidates the functionality of both the basic Store and
   the event-streaming KillStore into a single implementation. Event streaming
   features can be enabled/disabled via configuration.
 
@@ -113,10 +113,6 @@ defmodule WandererKills.Core.Storage.KillmailStore do
         :public,
         {:read_concurrency, true}
       ])
-
-      # Initialize counters
-      :ets.insert(@counters_table, {:event_counter, 0})
-      :ets.insert(@counters_table, {:killmail_seq, 0})
 
       event_tables = [@killmail_events_table, @client_offsets_table, @counters_table]
       all_tables = tables ++ event_tables
@@ -461,7 +457,7 @@ defmodule WandererKills.Core.Storage.KillmailStore do
 
       if :ets.info(@counters_table) != :undefined do
         :ets.delete_all_objects(@counters_table)
-        # Reinitialize counters
+        # Always reinitialize counters after clearing
         :ets.insert(@counters_table, {:event_counter, 0})
         :ets.insert(@counters_table, {:killmail_seq, 0})
       end
@@ -617,8 +613,30 @@ defmodule WandererKills.Core.Storage.KillmailStore do
   # Helper function to ensure table exists before creation
   defp ensure_table_exists(table_name, options) do
     case :ets.info(table_name) do
-      :undefined -> :ets.new(table_name, options)
-      _ -> table_name
+      :undefined ->
+        :ets.new(table_name, options)
+        maybe_initialize_counters(table_name)
+        table_name
+
+      _ ->
+        maybe_initialize_counters(table_name)
+        table_name
+    end
+  end
+
+  # Initialize counters if this is the counters table
+  defp maybe_initialize_counters(table_name) do
+    if table_name == @counters_table do
+      ensure_counter_exists(:event_counter, 0)
+      ensure_counter_exists(:killmail_seq, 0)
+    end
+  end
+
+  # Ensure a specific counter exists with default value
+  defp ensure_counter_exists(counter_key, default_value) do
+    case :ets.lookup(@counters_table, counter_key) do
+      [] -> :ets.insert(@counters_table, {counter_key, default_value})
+      _ -> :ok
     end
   end
 
