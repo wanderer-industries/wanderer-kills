@@ -179,7 +179,6 @@ defmodule WandererKills.Ingest.RedisQ do
       kills_received: 0,
       kills_older: 0,
       kills_skipped: 0,
-      legacy_kills: 0,
       errors: 0,
       no_kills_count: 0,
       circuit_open_skips: 0,
@@ -190,7 +189,6 @@ defmodule WandererKills.Ingest.RedisQ do
       total_kills_received: 0,
       total_kills_older: 0,
       total_kills_skipped: 0,
-      total_legacy_kills: 0,
       total_errors: 0,
       total_no_kills_count: 0,
       total_circuit_open_skips: 0
@@ -308,7 +306,6 @@ defmodule WandererKills.Ingest.RedisQ do
       | kills_received: 0,
         kills_older: 0,
         kills_skipped: 0,
-        legacy_kills: 0,
         errors: 0,
         no_kills_count: 0,
         last_reset: DateTime.utc_now(),
@@ -340,14 +337,13 @@ defmodule WandererKills.Ingest.RedisQ do
       kills_processed: state.stats.total_kills_received,
       kills_older: state.stats.total_kills_older,
       kills_skipped: state.stats.total_kills_skipped,
-      legacy_kills: state.stats.total_legacy_kills,
       errors: state.stats.total_errors,
       no_kills_polls: state.stats.total_no_kills_count,
       active_systems: MapSet.size(state.stats.systems_active),
       total_polls:
         state.stats.total_kills_received + state.stats.total_kills_older +
-          state.stats.total_kills_skipped + state.stats.total_legacy_kills +
-          state.stats.total_no_kills_count + state.stats.total_errors,
+          state.stats.total_kills_skipped + state.stats.total_no_kills_count +
+          state.stats.total_errors,
       last_reset: state.stats.last_reset,
       last_kill_received_at: state.stats.last_kill_received_at
     }
@@ -391,15 +387,6 @@ defmodule WandererKills.Ingest.RedisQ do
       stats
       | kills_received: stats.kills_received + 1,
         total_kills_received: stats.total_kills_received + 1,
-        last_kill_received_at: System.system_time(:second)
-    }
-  end
-
-  defp update_stats(stats, {:ok, :legacy_kill}) do
-    %{
-      stats
-      | legacy_kills: stats.legacy_kills + 1,
-        total_legacy_kills: stats.total_legacy_kills + 1,
         last_kill_received_at: System.system_time(:second)
     }
   end
@@ -502,17 +489,10 @@ defmodule WandererKills.Ingest.RedisQ do
         Logger.debug("[RedisQ] No package received.")
         {:ok, :no_kills}
 
-      # New‐format: "package" → %{ "killID" => _, "killmail" => killmail, "zkb" => zkb }
-      {:ok, %{body: %{"package" => %{"killID" => _id, "killmail" => killmail, "zkb" => zkb}}}} ->
-        process_kill(killmail, zkb)
-
-      # Alternate new‐format (sometimes `killID` is absent, but `killmail`+`zkb` exist)
-      {:ok, %{body: %{"package" => %{"killmail" => killmail, "zkb" => zkb}}}} ->
-        process_kill(killmail, zkb)
-
-      # Legacy format: { "killID" => id, "zkb" => zkb }
-      {:ok, %{body: %{"killID" => id, "zkb" => zkb}}} ->
-        process_legacy_kill(id, zkb, queue_id)
+      # Standard format: package contains killID and zkb metadata
+      # Full killmail data is fetched from ESI using the hash
+      {:ok, %{body: %{"package" => %{"killID" => id, "zkb" => zkb}}}} ->
+        process_kill_package(id, zkb, queue_id)
 
       # Anything else is unexpected
       {:ok, resp} ->
@@ -527,91 +507,52 @@ defmodule WandererKills.Ingest.RedisQ do
     end
   end
 
-  # Handle a "new‐format" killmail JSON blob.  Return one of:
-  #   {:ok, :kill_received}   if it's a brand-new kill
-  #   {:ok, :kill_older}      if parser determined it's older than cutoff
-  #   {:ok, :kill_skipped}    if parser determined we already ingested it
-  #   {:error, reason}
+  # Process a kill package from RedisQ.
+  # Fetches full killmail data from ESI using the hash, then processes it.
   #
-  # This requires that Coordinator.parse_full_and_store/3 returns exactly
-  #   {:ok, :kill_older}   or
-  #   {:ok, :kill_skipped}
-  # when appropriate—otherwise, we treat any other {:ok, _} as :kill_received.
-  defp process_kill(killmail, zkb) do
-    cutoff = get_cutoff_time()
-
-    Logger.debug(
-      "[RedisQ] Processing new format killmail (cutoff: #{DateTime.to_iso8601(cutoff)})"
-    )
-
-    merged = Map.merge(killmail, %{"zkb" => zkb})
-
-    case UnifiedProcessor.process_killmail(merged, cutoff) do
-      {:ok, :kill_older} ->
-        Logger.debug(fn -> "[RedisQ] Kill is older than cutoff → skipping." end)
-        {:ok, :kill_older}
-
-      {:ok, enriched_killmail} ->
-        # Broadcast kill update via PubSub using the enriched killmail
-        broadcast_killmail_update_enriched(enriched_killmail)
-
-        {:ok, :kill_received}
-
-      {:error, reason} ->
-        Logger.error("[RedisQ] Failed to parse/store killmail: #{inspect(reason)}")
-        {:error, reason}
-    end
-  end
-
-  # Handle legacy‐format kill → fetch full payload async and then process.
   # Returns one of:
-  #   {:ok, :legacy_kill}     (if Coordinator.parse... says new)
-  #   {:ok, :kill_older}      (if Coordinator returns :kill_older)
-  #   {:ok, :kill_skipped}    (if Coordinator returns :kill_skipped)
-  #   {:error, reason}
-  defp process_legacy_kill(id, zkb, queue_id) do
-    Logger.warning("[RedisQ] Processing LEGACY kill format",
+  #   {:ok, :kill_received}   if successfully processed
+  #   {:ok, :kill_older}      if killmail is older than cutoff
+  #   {:ok, :kill_skipped}    if already ingested
+  #   {:error, reason}        on failure
+  defp process_kill_package(id, zkb, queue_id) do
+    Logger.debug("[RedisQ] Processing kill package",
       kill_id: id,
       queue_id: queue_id,
-      zkb_has: Map.keys(zkb || %{}),
-      message: "Legacy kill format detected - this format may be deprecated"
+      zkb_keys: Map.keys(zkb || %{})
     )
 
     task =
       Task.Supervisor.async(WandererKills.TaskSupervisor, fn ->
-        fetch_and_parse_full_kill(id, zkb)
+        fetch_and_process_killmail(id, zkb)
       end)
 
     task
     |> Task.await(@task_timeout_ms)
     |> case do
       {:ok, :kill_received} ->
-        Logger.warning("[RedisQ] Successfully processed LEGACY kill",
-          kill_id: id,
-          message: "Consider migrating to new kill format"
-        )
-
-        {:ok, :legacy_kill}
+        Logger.debug("[RedisQ] Successfully processed kill", kill_id: id)
+        {:ok, :kill_received}
 
       {:ok, :kill_older} ->
-        Logger.debug("[RedisQ] Legacy kill ID=#{id} is older than cutoff → skipping.")
+        Logger.debug("[RedisQ] Kill ID=#{id} is older than cutoff → skipping.")
         {:ok, :kill_older}
 
       {:ok, :kill_skipped} ->
-        Logger.debug("[RedisQ] Legacy kill ID=#{id} already ingested → skipping.")
+        Logger.debug("[RedisQ] Kill ID=#{id} already ingested → skipping.")
         {:ok, :kill_skipped}
 
       {:error, reason} ->
-        Logger.error("[RedisQ] Legacy‐kill #{id} failed: #{inspect(reason)}")
+        Logger.error("[RedisQ] Kill #{id} processing failed: #{inspect(reason)}")
         {:error, reason}
 
       other ->
-        Logger.error("[RedisQ] Unexpected task result for legacy kill #{id}: #{inspect(other)}")
+        Logger.error("[RedisQ] Unexpected task result for kill #{id}: #{inspect(other)}")
 
         {:error,
          Error.system_error(
            :unexpected_task_result,
-           "Unexpected task result for legacy kill",
+           "Unexpected task result for kill processing",
            false,
            %{
              kill_id: id,
@@ -622,15 +563,14 @@ defmodule WandererKills.Ingest.RedisQ do
     end
   end
 
-  # Fetch the full killmail from ESI and then hand off to `process_kill/2`.
-  # Returns exactly whatever `process_kill/2` returns.
-  defp fetch_and_parse_full_kill(id, zkb) do
-    Logger.debug("[RedisQ] Fetching full killmail for ID=#{id}")
+  # Fetch the full killmail from ESI and process it through the pipeline.
+  defp fetch_and_process_killmail(id, zkb) do
+    Logger.debug("[RedisQ] Fetching killmail from ESI", kill_id: id)
 
     case EsiClient.get_killmail_raw(id, zkb["hash"]) do
       {:ok, full_killmail} ->
-        Logger.debug("[RedisQ] Fetched full killmail ID=#{id}. Now parsing…")
-        process_kill(full_killmail, zkb)
+        Logger.debug("[RedisQ] Fetched killmail from ESI, processing", kill_id: id)
+        process_fetched_killmail(full_killmail, zkb)
 
       {:error, reason} ->
         Logger.warning("[RedisQ] ESI fetch failed for ID=#{id}: #{inspect(reason)}")
@@ -638,11 +578,30 @@ defmodule WandererKills.Ingest.RedisQ do
     end
   end
 
+  # Process a killmail that has been fetched from ESI.
+  defp process_fetched_killmail(killmail, zkb) do
+    cutoff = get_cutoff_time()
+    merged = Map.merge(killmail, %{"zkb" => zkb})
+
+    case UnifiedProcessor.process_killmail(merged, cutoff) do
+      {:ok, :kill_older} ->
+        {:ok, :kill_older}
+
+      {:ok, enriched_killmail} ->
+        broadcast_killmail_update_enriched(enriched_killmail)
+        {:ok, :kill_received}
+
+      {:error, reason} ->
+        Logger.error("[RedisQ] Failed to process killmail: #{inspect(reason)}")
+        {:error, reason}
+    end
+  end
+
   # Decide the next polling interval and updated backoff based on the last result.
   # Returns: {next_delay_ms, updated_backoff_ms}
-  defp next_schedule({:ok, result}, _old_backoff) when result in [:kill_received, :legacy_kill] do
+  defp next_schedule({:ok, :kill_received}, _old_backoff) do
     fast = @fast_interval_ms
-    Logger.debug("[RedisQ] #{result} → scheduling next poll in #{fast}ms; resetting backoff.")
+    Logger.debug("[RedisQ] Kill received → scheduling next poll in #{fast}ms; resetting backoff.")
     {fast, @initial_backoff_ms}
   end
 
