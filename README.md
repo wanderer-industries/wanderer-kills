@@ -1,127 +1,174 @@
-# WandererKills Documentation
+# WandererKills
 
-Welcome to the WandererKills service documentation. WandererKills is a real-time EVE Online killmail data service built with Elixir/Phoenix.
+A standalone Elixir service that streams and caches EVE Online killmails from
+zKillboard, enriches them with data from ESI, and fans them out over REST,
+WebSocket, SSE, and PubSub.
 
-## 🎯 Simplified Architecture
+Point it at the systems or characters you care about and it handles the parts
+that are tedious to get right: staying inside zKillboard's and ESI's rate
+limits, retrying and circuit-breaking around upstream failures, resolving IDs to
+names and ship types, and keeping a warm cache so your clients aren't re-fetching
+the same killmail.
 
-The codebase underwent major simplification across 6 sprints, achieving:
-- **39% reduction** in module count (115 → ~70)
-- **50% simpler** processing pipeline (6 → 3 stages)
-- **50% fewer** cache namespaces (8 → 4)
-- **10-194x better** performance than requirements
-- **100% functionality** preserved
+## Quick start
 
-## 📖 [API & Integration Guide](API_AND_INTEGRATION_GUIDE.md)
+Requires Elixir 1.19.5 / OTP 28 (see `.tool-versions`; a Nix flake is provided).
 
-**Complete documentation** - This is the primary documentation source for the WandererKills service.
-
-**Covers everything you need:**
-- REST API endpoints with examples
-- WebSocket real-time integration
-- Server-Sent Events (SSE) streaming
-- PubSub integration for Elixir apps
-- Client library usage
-- Error handling and best practices
-- Code examples in Python, Node.js, and Elixir
-- Rate limiting and monitoring
-- Troubleshooting guide
-
-## Quick Start
-
-1. **For HTTP/REST integration**: See [REST API Integration](API_AND_INTEGRATION_GUIDE.md#rest-api-integration)
-2. **For WebSocket real-time data**: See [WebSocket Integration](API_AND_INTEGRATION_GUIDE.md#websocket-integration)
-3. **For SSE streaming**: See [Server-Sent Events](API_AND_INTEGRATION_GUIDE.md#server-sent-events-sse-stream)
-4. **For Elixir applications**: See [PubSub Integration](API_AND_INTEGRATION_GUIDE.md#pubsub-integration-elixir-applications)
-5. **For client library usage**: See [Client Library Integration](API_AND_INTEGRATION_GUIDE.md#client-library-integration-elixir)
-
-## Service Information
-
-- **Default Port**: 4004
-- **Base URL**: `http://localhost:4004/api/v1`
-- **Health Check**: `http://localhost:4004/health`
-- **Status Endpoint**: `http://localhost:4004/status`
-- **Metrics**: `http://localhost:4004/metrics`
-- **WebSocket Info**: `http://localhost:4004/websocket`
-- **SSE Stream**: `http://localhost:4004/api/v1/kills/stream`
-- **OpenAPI Spec**: `http://localhost:4004/api/openapi`
-
-## Architecture Overview
-
-WandererKills provides:
-- Real-time killmail data from zKillboard via R2Z2
-- Historical data fetching and caching
-- ESI (EVE Swagger Interface) data enrichment
-- Multiple integration patterns for different use cases
-- Comprehensive monitoring and observability
-
-### Simplified Processing Pipeline
-```
-Killmail Data → Validation → Enrichment → Storage
+```bash
+mix deps.get
+mix phx.server          # or: make start, for iex + the server
 ```
 
-### Key Components
-- **UnifiedProcessor**: Orchestrates the 3-stage pipeline
-- **SmartRateLimiter**: Unified rate limiting with dual-mode operation
-- **WandererKills.Http.Client**: Foundation for all HTTP operations
-- **4 Cache Namespaces**: killmails, systems, esi_data, temp_data
+The service listens on port 4004. Confirm it's up and pull some kills:
 
-## Common Integration Patterns
+```bash
+curl http://localhost:4004/health
 
-### 1. REST API (HTTP)
+# Kills in Jita (system 30000142) from the last 24 hours
+curl "http://localhost:4004/api/v1/kills/system/30000142?since_hours=24&limit=50"
+```
 
-Best for batch processing and simple integrations.
-- Get kills by system
-- Bulk fetch multiple systems
-- Query specific killmails
-- Manage webhook subscriptions
+Each killmail comes back enriched — character, corporation, and ship names are
+resolved, alongside zKillboard's own valuation metadata:
 
-### 2. WebSocket
+```json
+{
+  "data": {
+    "kills": [
+      {
+        "killmail_id": 123456789,
+        "kill_time": "2024-01-15T14:30:00Z",
+        "system_id": 30000142,
+        "victim": {
+          "character_name": "Victim Name",
+          "corporation_name": "Victim Corp",
+          "ship_name": "Raven",
+          "damage_taken": 2847
+        },
+        "attackers": [{ "ship_name": "Rattlesnake", "final_blow": true }],
+        "zkb": { "total_value": 152000000.0, "points": 15, "solo": true }
+      }
+    ],
+    "cached": false
+  }
+}
+```
 
-Best for real-time dashboards and low-latency applications.
-- Real-time killmail updates
-- System and character-based subscriptions
-- Historical data preloading
-- Dynamic subscription management
+Or run it in a container:
 
-### 3. Server-Sent Events (SSE)
+```bash
+docker compose up --build
+```
 
-Best for simple server-to-client streaming without complex client libraries.
-- HTTP-based streaming protocol
-- Native browser EventSource support
-- Automatic reconnection
-- Proxy and firewall friendly
+## Choosing an integration
 
-### 4. PubSub (Elixir)
+The service exposes the same data five ways. Pick based on how you consume it:
 
-Best for Elixir applications in the same environment requiring high throughput.
-- Direct Phoenix.PubSub integration
-- Minimal latency
-- Event-driven architecture
+| Approach | Use it when |
+|---|---|
+| **REST** | You poll, backfill, or batch-fetch. Simplest to start with. |
+| **WebSocket** | You want push updates with dynamic subscriptions — dashboards, live tools. Phoenix Channels, so any Phoenix client works. |
+| **SSE** | You want push updates without a channel client. Plain HTTP, native `EventSource`, proxy-friendly. |
+| **PubSub** | Your Elixir app runs in the same cluster and you want the lowest possible latency. |
+| **Client library** | You're on Elixir and want a typed interface over the REST API. |
 
-### 5. Client Library (Elixir)
+Full request/response details, subscription semantics, and client examples in
+Python, JavaScript, and Elixir live in the
+[API & Integration Guide](docs/API_AND_INTEGRATION_GUIDE.md). Elixir consumers
+should also read the [Elixir Client Guide](docs/ELIXIR_CLIENT_GUIDE.md).
+Runnable clients are in [`examples/`](examples/).
 
-Best for type-safe integration with compile-time interface validation.
-- Full API coverage
-- Built-in error handling
-- Telemetry integration
+## Endpoints
 
-## Key Features
+**Killmails**
 
-- **Caching**: Simplified 4-namespace caching with sub-10μs operations
-- **Event Streaming**: Real-time updates via WebSocket, SSE, and PubSub
-- **Batch Operations**: Efficient bulk data fetching with Flow
-- **Monitoring**: Real-time dashboard, unified health checks, and telemetry
-- **Ship Type Data**: Pre-loaded ship type information for enrichment
-- **Error Handling**: Standardized error responses using Core.Support.Error
-- **Performance**: 10-194x better than requirements across all operations
-- **Scalability**: Supports 10,000+ WebSocket connections, 50,000 character subscriptions
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/api/v1/kills/system/:system_id` | Kills in a system (`since_hours`, `limit`) |
+| `POST` | `/api/v1/kills/systems` | Bulk fetch across multiple systems |
+| `GET` | `/api/v1/kills/cached/:system_id` | Cached kills only, no upstream fetch |
+| `GET` | `/api/v1/kills/count/:system_id` | Kill count for a system |
+| `GET` | `/api/v1/killmail/:killmail_id` | A single killmail |
 
-## Getting Help
+**Streaming**
 
-- **Comprehensive Guide**: [API_AND_INTEGRATION_GUIDE.md](API_AND_INTEGRATION_GUIDE.md)
-- **Performance Guide**: [PERFORMANCE.md](PERFORMANCE.md)
-- **Developer Guide**: See [CLAUDE.md](../CLAUDE.md) for architecture details
-- **Example Clients**: See the `/examples` directory
-- **Health Check**: Monitor service status at `GET /health`
-- **Real-time Dashboard**: Access system metrics at `http://localhost:4004/dashboard`
-- **GitHub Issues**: Report bugs or request features
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/api/v1/kills/stream` | SSE stream |
+| `GET` | `/api/v1/kills/stream/enhanced` | SSE with historical preload (`character_ids`, `system_ids`, `preload_days`) |
+| — | `/socket` → `killmails:lobby` | WebSocket (Phoenix Channels), no auth |
+
+**Subscriptions**
+
+| Method | Path | Purpose |
+|---|---|---|
+| `POST` | `/api/v1/subscriptions` | Create a webhook subscription |
+| `GET` | `/api/v1/subscriptions` | List subscriptions |
+| `GET` | `/api/v1/subscriptions/stats` | Subscription statistics |
+| `DELETE` | `/api/v1/subscriptions/:subscriber_id` | Remove a subscription |
+
+**Operations**
+
+`GET /ping` · `GET /health` · `GET /status` · `GET /metrics` ·
+`GET /api/openapi` · `GET /websocket` (connection info)
+
+The service root (`GET /`) serves an HTML status dashboard with live health and
+cache metrics.
+
+## Configuration
+
+Set at runtime via environment variables (see `config/runtime.exs`):
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `PORT` | `4004` | HTTP listen port |
+| `BIND_IP` | `0.0.0.0` | Listen address |
+| `HOST` / `SCHEME` / `URL_PORT` | `localhost` / env-dependent | Externally advertised URL |
+| `SMART_RATE_LIMITING` | `true` | Adaptive upstream rate limiting |
+| `REQUEST_COALESCING` | `true` | Collapse duplicate in-flight requests |
+| `HISTORICAL_STREAMING_ENABLED` | `false` | Backfill historical killmails on boot |
+| `HISTORICAL_START_DATE` | `20240101` | Backfill start date (`YYYYMMDD`) |
+
+Rate limit, timeout, and backoff defaults encode observed zKillboard and ESI
+behavior — change them only with a reason to.
+
+## How it works
+
+```
+zKillboard (RedisQ) ─┐
+                     ├─→ Validation → ESI enrichment → Cache ─→ REST / WS / SSE / PubSub
+Historical fetch ────┘
+```
+
+- **`Ingest.R2Z2`** consumes zKillboard's RedisQ stream and drives the
+  processing pipeline.
+- **`Ingest.SmartRateLimiter`** governs upstream request rates, with circuit
+  breaking and request coalescing around zKillboard and ESI.
+- **`Ingest.HistoricalFetcher`** backfills past killmails when enabled.
+- **`Core.Cache`** stores everything across four namespaces — `killmails`,
+  `systems`, `esi_data`, and `temp_data` — each with its own TTL.
+- **`Subs`** maintains subscriptions and their system/character indexes, and
+  broadcasts matches to WebSocket, SSE, and PubSub consumers.
+
+The `Core`, `Domain`, and `Ingest` layers declare compile-time boundaries
+enforced by the `:boundary` compiler, so cross-layer calls have to go through
+each layer's declared public API.
+
+## Development
+
+```bash
+mix test              # full suite
+mix test.core         # library tests, no web endpoint
+mix test.headless     # offline-safe run (excludes :web)
+mix test.perf         # performance suite
+mix check             # format --check-formatted + credo + dialyzer
+mix format
+```
+
+`mix check` is the gate to run before opening a PR.
+
+Subscriber payload shapes are a public contract documented in the guides under
+`docs/`. Additive fields are fine; renames and removals are breaking and need
+those docs updated in the same change.
+
+Debugging recipes live in [DEBUG_COMMANDS.md](DEBUG_COMMANDS.md).
