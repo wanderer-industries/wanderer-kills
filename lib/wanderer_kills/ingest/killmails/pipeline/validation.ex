@@ -263,10 +263,18 @@ defmodule WandererKills.Ingest.Killmails.Pipeline.Validation do
   defp validate_victim(_),
     do: {:error, Error.validation_error(:invalid_victim, "Victim must be a map")}
 
-  defp validate_attackers(attackers) when is_list(attackers) and length(attackers) > 0, do: :ok
+  defp validate_attackers(attackers) do
+    if attackers != [] and proper_list?(attackers) do
+      :ok
+    else
+      {:error, Error.validation_error(:invalid_attackers, "Attackers must be a non-empty list")}
+    end
+  end
 
-  defp validate_attackers(_),
-    do: {:error, Error.validation_error(:invalid_attackers, "Attackers must be a non-empty list")}
+  # is_list/1 also accepts improper lists, which cannot be normalized downstream.
+  defp proper_list?([]), do: true
+  defp proper_list?([_ | tail]), do: proper_list?(tail)
+  defp proper_list?(_), do: false
 
   # ============================================================================
   # Private Helper Functions - Time Handling

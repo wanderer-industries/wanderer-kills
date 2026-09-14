@@ -1149,7 +1149,7 @@ defmodule WandererKills.Core.Observability.Metrics do
     durations = Enum.map(successful_metrics, & &1.duration_ms)
 
     avg_duration =
-      if length(durations) > 0 do
+      if durations != [] do
         Enum.sum(durations) / length(durations)
       else
         0.0

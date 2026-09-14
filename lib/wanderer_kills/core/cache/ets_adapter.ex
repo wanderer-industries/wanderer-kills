@@ -52,7 +52,7 @@ defmodule WandererKills.Core.Cache.ETSAdapter do
       :undefined ->
         create_table(cache_name)
 
-      table_ref when table_ref != :undefined ->
+      _table_ref ->
         # Check if table has wrong keypos and recreate if needed
         case :ets.info(cache_name) do
           :undefined ->

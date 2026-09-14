@@ -65,13 +65,7 @@ defmodule WandererKillsWeb.KillsController do
         limit: limit
       )
 
-      # Convert parameters to ZkbClient format
-      opts = [past_seconds: since_hours * 3600]
-
-      case Utils.retry_http_operation(
-             fn -> ZkbClient.fetch_system_killmails(system_id, opts) end,
-             operation_name: "ZKB fetch system killmails #{system_id}"
-           ) do
+      case fetch_system_killmails_with_retry(system_id, since_hours) do
         {:ok, killmails} ->
           # Apply limit and time filtering
           filtered_killmails =
@@ -149,16 +143,7 @@ defmodule WandererKillsWeb.KillsController do
         limit: limit
       )
 
-      # Fetch killmails for all systems
-      tasks =
-        Enum.map(system_ids, fn system_id ->
-          Task.async(fn -> fetch_system_killmails_task(system_id, since_hours, limit) end)
-        end)
-
-      systems_killmails =
-        tasks
-        |> Enum.map(&Task.await(&1, 30_000))
-        |> Enum.into(%{})
+      systems_killmails = fetch_systems_killmails(system_ids, since_hours, limit)
 
       response = %{
         systems_kills: systems_killmails,
@@ -399,6 +384,26 @@ defmodule WandererKillsWeb.KillsController do
       {:ok, kill_time, _} -> DateTime.compare(kill_time, cutoff_time) != :lt
       _ -> true
     end
+  end
+
+  defp fetch_system_killmails_with_retry(system_id, since_hours) do
+    opts = [past_seconds: since_hours * 3600]
+
+    Utils.retry_http_operation(
+      fn -> ZkbClient.fetch_system_killmails(system_id, opts) end,
+      operation_name: "ZKB fetch system killmails #{system_id}"
+    )
+  end
+
+  defp fetch_systems_killmails(system_ids, since_hours, limit) do
+    tasks =
+      Enum.map(system_ids, fn system_id ->
+        Task.async(fn -> fetch_system_killmails_task(system_id, since_hours, limit) end)
+      end)
+
+    tasks
+    |> Enum.map(&Task.await(&1, 30_000))
+    |> Enum.into(%{})
   end
 
   defp fetch_system_killmails_task(system_id, since_hours, limit) do

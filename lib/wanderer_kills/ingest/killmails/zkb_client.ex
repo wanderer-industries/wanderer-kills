@@ -669,7 +669,7 @@ defmodule WandererKills.Ingest.Killmails.ZkbClient do
     )
 
     # Track format for telemetry if we have killmails
-    if length(killmails) > 0 do
+    if killmails != [] do
       sample = List.first(killmails)
 
       format_type =
