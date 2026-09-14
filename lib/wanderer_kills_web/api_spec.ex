@@ -50,6 +50,7 @@ defmodule WandererKillsWeb.ApiSpec do
         }
       }
     }
+    |> OpenApiSpex.resolve_schema_modules()
   end
 
   defp killmail_schema do
