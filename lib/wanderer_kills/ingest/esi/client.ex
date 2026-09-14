@@ -259,7 +259,7 @@ defmodule WandererKills.Ingest.ESI.Client do
 
     errors = Enum.filter(results, &match?({:error, _}, &1))
 
-    if length(errors) > 0 do
+    if errors != [] do
       Logger.error("Failed to update some ship groups",
         error_count: length(errors),
         total_groups: length(group_ids)
@@ -326,7 +326,7 @@ defmodule WandererKills.Ingest.ESI.Client do
     errors = Enum.filter(results, &match?({:error, _}, &1))
     successes = Enum.filter(results, &match?({:ok, _}, &1))
 
-    if length(errors) > 0 do
+    if errors != [] do
       Logger.error("Failed to fetch some groups",
         error_count: length(errors),
         success_count: length(successes)
@@ -359,7 +359,7 @@ defmodule WandererKills.Ingest.ESI.Client do
     errors = Enum.filter(results, &match?({:error, _}, &1))
     successes = Enum.filter(results, &match?({:ok, _}, &1))
 
-    if length(errors) > 0 do
+    if errors != [] do
       Logger.error("Failed to fetch some types",
         error_count: length(errors),
         success_count: length(successes)

@@ -92,17 +92,8 @@ defmodule WandererKillsWeb.HealthController do
     else
       _ ->
         try do
-          case R2Z2.get_circuit_status(1000) do
-            {:ok, status} when is_map(status) ->
-              normalize_circuit_status(status)
-
-            other ->
-              Logger.error(
-                "[HealthController] Unexpected circuit status reply: #{inspect(other)}"
-              )
-
-              %{circuit_state: :unknown, error: "invalid_response"}
-          end
+          {:ok, status} = R2Z2.get_circuit_status(1000)
+          normalize_circuit_status(status)
         rescue
           e ->
             Logger.error("[HealthController] Exception getting circuit status: #{inspect(e)}")
@@ -117,7 +108,7 @@ defmodule WandererKillsWeb.HealthController do
     end
   end
 
-  defp validate_circuit_status(status) when is_map(status) do
+  defp validate_circuit_status(status) do
     cs = Map.get(status, :circuit_state)
     err = Map.get(status, :error)
 
@@ -127,8 +118,6 @@ defmodule WandererKillsWeb.HealthController do
       :error
     end
   end
-
-  defp validate_circuit_status(_), do: :error
 
   defp normalize_circuit_status(status) when is_map(status) do
     status

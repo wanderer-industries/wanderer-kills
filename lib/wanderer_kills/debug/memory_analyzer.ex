@@ -425,7 +425,7 @@ defmodule WandererKills.Debug.MemoryAnalyzer do
       end)
 
     improvements =
-      if length(high_queue) > 0 do
+      if high_queue != [] do
         improvements ++ ["#{length(high_queue)} processes have high message queues (>1000)"]
       else
         improvements

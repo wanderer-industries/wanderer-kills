@@ -243,7 +243,6 @@ defmodule WandererKills.Ingest.CircuitBreakerMonitor do
   end
 
   defp source_label(:r2z2), do: "R2Z2"
-  defp source_label(other), do: other |> Atom.to_string() |> String.upcase()
 
   defp format_duration(ms) do
     seconds = div(ms, 1000)

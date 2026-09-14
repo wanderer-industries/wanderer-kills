@@ -469,7 +469,7 @@ defmodule WandererKills.Ingest.HistoricalFetcher do
     total_count =
       receive do
         {:final_state, final_buffer, total_fetched} ->
-          if length(final_buffer) > 0 do
+          if final_buffer != [] do
             deliver_batch(request.subscription_id, final_buffer)
           end
 
@@ -529,7 +529,7 @@ defmodule WandererKills.Ingest.HistoricalFetcher do
     {to_deliver, remaining} =
       Enum.split(buffer, request.config["delivery_batch_size"])
 
-    if length(to_deliver) > 0 do
+    if to_deliver != [] do
       deliver_batch(request.subscription_id, to_deliver)
 
       # Rate limit delivery

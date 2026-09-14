@@ -155,18 +155,22 @@ defmodule WandererKills.Ingest.Killmails.UnifiedProcessor do
         {:ok, :kill_older}
 
       {:ok, validated} ->
-        # Early exit if only validation requested
-        if Keyword.get(opts, :validate_only, false) do
-          {:ok, convert_to_struct(validated)}
-        else
-          with {:ok, enriched} <- maybe_enrich_killmail(validated, opts),
-               :ok <- maybe_store_killmail(enriched, opts) do
-            {:ok, convert_to_struct(enriched)}
-          end
-        end
+        process_validated_killmail(validated, opts)
 
       {:error, _} = error ->
         error
+    end
+  end
+
+  defp process_validated_killmail(validated, opts) do
+    # Early exit if only validation requested
+    if Keyword.get(opts, :validate_only, false) do
+      {:ok, convert_to_struct(validated)}
+    else
+      with {:ok, enriched} <- maybe_enrich_killmail(validated, opts),
+           :ok <- maybe_store_killmail(enriched, opts) do
+        {:ok, convert_to_struct(enriched)}
+      end
     end
   end
 

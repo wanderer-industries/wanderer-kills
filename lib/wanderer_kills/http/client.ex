@@ -274,12 +274,15 @@ defmodule WandererKills.Http.Client do
     {:error, Error.http_error(:connection_failed, "Connection refused for #{url}", true)}
   end
 
-  defp handle_request_error(%Mint.TransportError{reason: :closed}, _url) do
+  defp handle_request_error(%{__struct__: module, reason: :closed}, _url)
+       when module in [Mint.TransportError, Finch.TransportError] do
     Logger.warning("[HTTP] Connection closed - will retry")
     {:error, Error.http_error(:connection_closed, "Connection closed", true)}
   end
 
-  defp handle_request_error(%Mint.TransportError{} = transport_error, _url) do
+  # Finch < 0.22 returns Mint errors and does not define Finch.TransportError.
+  defp handle_request_error(%{__struct__: module} = transport_error, _url)
+       when module in [Mint.TransportError, Finch.TransportError] do
     Logger.warning("[HTTP] Transport error: #{inspect(transport_error)}")
 
     {:error,
@@ -429,9 +432,7 @@ defmodule WandererKills.Http.Client do
 
   defp extract_status_from_result({:ok, %{status: status}}), do: status
   defp extract_status_from_result({:error, %{details: %{status: status}}}), do: status
-  defp extract_status_from_result({:error, %{meta: %{status: status}}}), do: status
   defp extract_status_from_result({:error, _}), do: 0
-  defp extract_status_from_result(_), do: 0
 
   defp parse_retry_after(value) when is_binary(value) do
     case Integer.parse(value) do
@@ -453,7 +454,9 @@ defmodule WandererKills.Http.Client do
   defp do_finch_request_with_retry(request, finch_name, options, retry_count)
        when retry_count < 3 do
     case Finch.request(request, finch_name, options) do
-      {:error, %Mint.TransportError{reason: :closed}} when retry_count < 2 ->
+      {:error, %{__struct__: module, reason: :closed}}
+      when module in [Mint.TransportError, Finch.TransportError] and
+             request.method == "GET" and retry_count < 2 ->
         delay_ms = 100 * (retry_count + 1)
 
         Logger.debug(
@@ -468,7 +471,8 @@ defmodule WandererKills.Http.Client do
     end
   rescue
     error ->
-      if process_unavailable_error?(error) and retry_count < 2 do
+      # Never replay POST: an exception does not prove that the peer missed the body.
+      if request.method == "GET" and process_unavailable_error?(error) and retry_count < 2 do
         delay_ms = 100 * (retry_count + 1)
 
         Logger.warning(

@@ -73,7 +73,7 @@ defmodule WandererKills.Subs.Preloader do
     results =
       system_ids
       |> Enum.map(&preload_system(&1, limit_per_system, since_hours))
-      |> Enum.filter(fn {_system_id, kills} -> length(kills) > 0 end)
+      |> Enum.filter(fn {_system_id, kills} -> kills != [] end)
 
     # Broadcast and notify for each system with kills
     Enum.each(results, fn {system_id, kills} ->
@@ -114,7 +114,7 @@ defmodule WandererKills.Subs.Preloader do
   defp preload_system(system_id, limit, since_hours) do
     kills = __MODULE__.preload_kills_for_system(system_id, limit, since_hours)
 
-    if length(kills) > 0 do
+    if kills != [] do
       Logger.debug("[DEBUG] Preloaded kills for system",
         system_id: system_id,
         kill_count: length(kills)

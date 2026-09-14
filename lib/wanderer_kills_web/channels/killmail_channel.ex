@@ -174,7 +174,11 @@ defmodule WandererKillsWeb.KillmailChannel do
           socket = assign(socket, :subscribed_systems, all_systems)
 
           # Check if we need to unsubscribe from all_systems topic
-          maybe_unsubscribe_from_all_systems(socket, current_systems, new_systems)
+          maybe_unsubscribe_from_all_systems(
+            socket,
+            MapSet.size(current_systems),
+            MapSet.size(new_systems)
+          )
 
           # Track the subscription update
           Metrics.track_websocket_subscription(:updated, MapSet.size(new_systems), %{
@@ -350,7 +354,7 @@ defmodule WandererKillsWeb.KillmailChannel do
     # Filter killmails based on both system and character subscriptions
     filtered_killmails = Filter.filter_killmails(killmails, subscription)
 
-    if length(filtered_killmails) > 0 do
+    if filtered_killmails != [] do
       Logger.debug("Forwarding real-time kills to WebSocket client",
         user_id: socket.assigns.user_id,
         system_id: system_id,
@@ -491,7 +495,7 @@ defmodule WandererKillsWeb.KillmailChannel do
     # Filter killmails based on both system and character subscriptions
     filtered_killmails = Filter.filter_killmails(killmails, subscription)
 
-    if length(filtered_killmails) > 0 do
+    if filtered_killmails != [] do
       # Use structs directly for lazy JSON encoding (Jason.Encoder is implemented)
       push(socket, "killmail_update", %{
         system_id: system_id,
@@ -632,20 +636,23 @@ defmodule WandererKillsWeb.KillmailChannel do
       )
 
       # Subscribe to Phoenix PubSub topics
-      if length(valid_systems) > 0 do
-        subscribe_to_systems(valid_systems)
-      else
+      cond do
+        valid_systems != [] ->
+          subscribe_to_systems(valid_systems)
+
         # If only character subscriptions, subscribe to all_systems topic
-        if length(valid_characters) > 0 do
+        valid_characters != [] ->
           Phoenix.PubSub.subscribe(
             WandererKills.PubSub,
             Utils.all_systems_topic()
           )
-        end
+
+        true ->
+          :ok
       end
 
       # Schedule preload after join completes (can't push during join)
-      if length(valid_systems) > 0 do
+      if valid_systems != [] do
         send(self(), {:after_join, valid_systems, preload_config})
       end
 
@@ -852,7 +859,11 @@ defmodule WandererKillsWeb.KillmailChannel do
       )
 
       # Check if we need to unsubscribe from all_systems topic
-      maybe_unsubscribe_from_all_systems(socket, MapSet.new(), socket.assigns.subscribed_systems)
+      maybe_unsubscribe_from_all_systems(
+        socket,
+        0,
+        MapSet.size(socket.assigns.subscribed_systems)
+      )
 
       {:ok, socket}
     end
@@ -956,7 +967,7 @@ defmodule WandererKillsWeb.KillmailChannel do
 
   # Helper function to send preload kills to WebSocket client
   defp send_preload_kills_to_websocket(socket, system_id, kills) when is_list(kills) do
-    if length(kills) > 0 do
+    if kills != [] do
       # Use structs directly for lazy JSON encoding (Jason.Encoder is implemented)
       push(socket, "killmail_update", %{
         system_id: system_id,
@@ -1036,12 +1047,12 @@ defmodule WandererKillsWeb.KillmailChannel do
     {:reply, {:ok, message}, updated_socket}
   end
 
-  defp maybe_unsubscribe_from_all_systems(socket, current_systems, new_systems) do
+  defp maybe_unsubscribe_from_all_systems(socket, current_system_count, new_system_count) do
     current_characters = socket.assigns[:subscribed_characters] || MapSet.new()
 
     cond do
       # Case 1: Going from 0 system subscriptions to >0 and we have character subscriptions
-      MapSet.size(current_systems) == 0 and MapSet.size(new_systems) > 0 and
+      current_system_count == 0 and new_system_count > 0 and
           MapSet.size(current_characters) > 0 ->
         Phoenix.PubSub.unsubscribe(
           WandererKills.PubSub,
@@ -1055,7 +1066,7 @@ defmodule WandererKillsWeb.KillmailChannel do
         )
 
       # Case 2: No subscriptions remaining at all
-      MapSet.size(new_systems) == 0 and MapSet.size(current_characters) == 0 ->
+      new_system_count == 0 and MapSet.size(current_characters) == 0 ->
         Phoenix.PubSub.unsubscribe(
           WandererKills.PubSub,
           Utils.all_systems_topic()

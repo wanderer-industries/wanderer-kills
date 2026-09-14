@@ -227,10 +227,11 @@ defmodule IndexTestHelpers do
     # Spawn multiple processes doing concurrent operations
     tasks =
       for i <- 1..10 do
+        entities = if rem(i, 2) == 0, do: [entity1], else: [entity2]
+
         Task.async(fn ->
           # Each task adds/removes its own subscription
           subscription_id = "concurrent_sub_#{i}"
-          entities = if rem(i, 2) == 0, do: [entity1], else: [entity2]
 
           :ok = index_module.add_subscription(subscription_id, entities)
 
