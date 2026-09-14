@@ -332,8 +332,11 @@ defmodule WandererKills.Subs.SimpleSubscriptionManager do
     # Combine and broadcast
     all_subscriptions = (system_subscriptions ++ character_subscriptions) |> Enum.uniq()
 
-    # Broadcast via unified broadcaster
-    Broadcaster.broadcast_killmail_update(system_id, kills)
+    # NOTE: PubSub fan-out (SSE, WebSocket and character topics) is deliberately
+    # NOT done here. Callers reach it directly through
+    # Broadcaster.broadcast_killmail_update/2; doing it here as well delivered
+    # every killmail twice to every subscriber. This cast is responsible only
+    # for per-subscription delivery.
 
     # Send to specific subscriptions
     Enum.each(all_subscriptions, fn subscription_id ->
