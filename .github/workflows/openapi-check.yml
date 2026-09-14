@@ -5,226 +5,151 @@ on:
     paths:
       - 'lib/**/*.ex'
       - 'priv/openapi.json'
+      - 'priv/static/openapi.yaml'
+      - 'config/**/*.exs'
       - 'mix.exs'
+      - 'mix.lock'
+      - '.github/workflows/openapi-check.yml'
+      - 'scripts/check_openapi.sh'
+      - 'scripts/test_check_openapi.sh'
+
+permissions:
+  contents: read
 
 jobs:
   check-api-changes:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      issues: write
-      pull-requests: write
-    
+    env:
+      MIX_ENV: dev
+    defaults:
+      run:
+        shell: bash
+
     steps:
-      - name: Checkout PR branch
+      - name: Prepare reports
+        run: |
+          mkdir -p "$RUNNER_TEMP/openapi-report"
+          printf 'REPORT_DIR=%s/openapi-report\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
+
+      - name: Checkout exact PR base
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0
-      
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: base
+          persist-credentials: false
+
       - name: Setup Elixir
         id: beam
         uses: erlef/setup-beam@v1
         with:
           elixir-version: '1.19.5'
           otp-version: '28.5'
-      
-      - name: Cache dependencies
+
+      # Generate the base before executing PR code. Each checkout uses its own
+      # lockfile, deps, and _build; never compare generated paths to static YAML.
+      # Explicitly resolve both revisions: older ApiSpec.spec/0 implementations
+      # leave schema modules unresolved, and resolving twice is idempotent.
+      - name: Generate base OpenAPI spec
+        working-directory: base
+        run: |
+          mix deps.get --check-locked
+          mix compile
+          OPENAPI_OUTPUT="$REPORT_DIR/base-spec.json" mix run --no-start -e '
+            spec = WandererKillsWeb.ApiSpec.spec() |> OpenApiSpex.resolve_schema_modules()
+            File.write!(System.fetch_env!("OPENAPI_OUTPUT"), Jason.encode!(spec, pretty: true))
+          '
+          test -s "$REPORT_DIR/base-spec.json"
+
+      - name: Checkout current merge revision
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          path: current
+          persist-credentials: false
+
+      - name: Cache current dependencies
         uses: actions/cache@v4
         with:
           path: |
-            deps
-            _build
-          # _build artifacts are BEAM-version-specific; keep the version in
-          # both the key and the restore prefix.
-          key: ${{ runner.os }}-${{ steps.beam.outputs.elixir-version }}-${{ steps.beam.outputs.otp-version }}-mix-${{ hashFiles('**/mix.lock') }}
+            current/deps
+            current/_build
+          # Keep this cache separate from the base and other workflow caches.
+          # _build artifacts are BEAM-version-specific.
+          key: ${{ runner.os }}-${{ steps.beam.outputs.elixir-version }}-${{ steps.beam.outputs.otp-version }}-openapi-current-${{ hashFiles('current/mix.lock') }}
           restore-keys: |
-            ${{ runner.os }}-${{ steps.beam.outputs.elixir-version }}-${{ steps.beam.outputs.otp-version }}-mix-
-      
-      - name: Install dependencies
-        run: |
-          mix deps.get
-          mix deps.compile
-      
+            ${{ runner.os }}-${{ steps.beam.outputs.elixir-version }}-${{ steps.beam.outputs.otp-version }}-openapi-current-
+
       - name: Generate current OpenAPI spec
+        working-directory: current
         run: |
-          # Try generating spec directly first (more reliable for CI)
-          echo "🔧 Attempting to generate OpenAPI spec directly..."
-          if MIX_ENV=dev mix openapi.gen --output current-spec.json; then
-            echo "✓ OpenAPI spec generated successfully using direct method"
-          else
-            echo "Direct generation failed, trying server approach..."
-            
-            # Start server in background to fetch spec from API endpoint and capture logs
-            echo "Starting Phoenix server with logging..."
-            PORT=4004 MIX_ENV=dev mix phx.server > server.log 2>&1 &
-            SERVER_PID=$!
-            echo "Server PID: $SERVER_PID"
+          mix deps.get --check-locked
+          mix compile
+          OPENAPI_OUTPUT="$REPORT_DIR/current-spec.json" mix run --no-start -e '
+            spec = WandererKillsWeb.ApiSpec.spec() |> OpenApiSpex.resolve_schema_modules()
+            File.write!(System.fetch_env!("OPENAPI_OUTPUT"), Jason.encode!(spec, pretty: true))
+          '
+          test -s "$REPORT_DIR/current-spec.json"
 
-            # Add trap to cleanup on exit
-            trap "kill $SERVER_PID 2>/dev/null || true" EXIT INT TERM
+      - name: Install pinned oasdiff
+        working-directory: ${{ runner.temp }}
+        env:
+          OASDIFF_VERSION: '1.32.0'
+          OASDIFF_SHA256: '5b2050787cfee2a9a3ba7b25cb50fe2c5cc45cdf5b96fbc51a4a60107f8b4aad'
+        run: |
+          curl --fail --silent --show-error --location \
+            "https://github.com/oasdiff/oasdiff/releases/download/v${OASDIFF_VERSION}/oasdiff_${OASDIFF_VERSION}_linux_amd64.tar.gz" \
+            --output oasdiff.tar.gz
+          printf '%s  oasdiff.tar.gz\n' "$OASDIFF_SHA256" | sha256sum --check --strict
+          mkdir -p "$RUNNER_TEMP/bin"
+          tar -xzf oasdiff.tar.gz -C "$RUNNER_TEMP/bin" oasdiff
+          printf '%s\n' "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/bin/oasdiff" --version
 
-            # Wait for server to be ready with retries
-            echo "Waiting for Phoenix server to start..."
-            max_attempts=15  # Reduced attempts since we have fallback
-            attempt=0
+      - name: Test comparison helper
+        working-directory: ${{ runner.temp }}
+        run: bash "$GITHUB_WORKSPACE/current/scripts/test_check_openapi.sh"
 
-            while [ $attempt -lt $max_attempts ]; do
-              # Check if server process is still running
-              if ! kill -0 $SERVER_PID 2>/dev/null; then
-                echo "❌ Server process died! Showing logs:"
-                cat server.log
-                kill $SERVER_PID 2>/dev/null || true
-                exit 1
-              fi
+      - name: Compare generated specifications
+        id: comparison
+        # Defer the failure until the summary and artifact have been published.
+        continue-on-error: true
+        working-directory: ${{ runner.temp }}
+        run: |
+          bash "$GITHUB_WORKSPACE/current/scripts/check_openapi.sh" \
+            "$REPORT_DIR/base-spec.json" "$REPORT_DIR/current-spec.json" "$REPORT_DIR"
 
-              if curl -f -s http://localhost:4004/api/openapi > /dev/null 2>&1; then
-                echo "✓ Server is ready!"
-                break
-              fi
-
-              attempt=$((attempt + 1))
-              echo "Attempt $attempt/$max_attempts - Server not ready yet, waiting..."
-
-              # Show some logs every 3 attempts to debug
-              if [ $((attempt % 3)) -eq 0 ]; then
-                echo "=== Server logs (last 5 lines) ==="
-                tail -5 server.log 2>/dev/null || echo "No logs yet"
-                echo "==============================="
-              fi
-
-              sleep 2
-            done
-
-            if [ $attempt -eq $max_attempts ]; then
-              echo "❌ Server failed to start after $max_attempts attempts"
-              echo "=== Full server logs ==="
-              cat server.log
-              echo "======================="
-              kill $SERVER_PID 2>/dev/null || true
-              exit 1
-            fi
-
-            # Fetch the OpenAPI spec from the API endpoint
-            curl -f http://localhost:4004/api/openapi > current-spec.json || (kill $SERVER_PID && exit 1)
-
-            # Kill the server
-            kill $SERVER_PID || true
+      # Summaries/artifacts work for forks and read-only tokens, without PR
+      # comments or privileged events. Missing generation is an error, not an
+      # empty baseline or a successful comparison.
+      - name: Publish job summary
+        if: always()
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          CURRENT_SHA: ${{ github.sha }}
+        run: |
+          REPORT_DIR="$RUNNER_TEMP/openapi-report"
+          mkdir -p "$REPORT_DIR"
+          if [[ ! -f "$REPORT_DIR/summary.md" ]]; then
+            {
+              printf '# OpenAPI specification comparison\n\nStatus: ERROR\n\n'
+              printf 'Setup, generation, or comparison did not complete; see the failed step logs.\n\n'
+              printf 'Threshold: ERR. WARN-only changes are reported but do not block.\n'
+            } > "$REPORT_DIR/summary.md"
           fi
-      
-      - name: Checkout main branch spec
-        run: |
-          # Get the OpenAPI spec from main branch
-          git show origin/main:priv/static/openapi.yaml > main-spec.yaml 2>/dev/null || cat > main-spec.yaml << 'EOF'
-          openapi: "3.0.0"
-          info:
-            title: "Wanderer Kills API"
-            version: "1.0.0"
-          paths: {}
-          EOF
-          
-          # Convert YAML to JSON for comparison (if the main spec is YAML)
-          if [ -f main-spec.yaml ]; then
-            npx js-yaml main-spec.yaml > main-spec.json
-          else
-            cp main-spec.yaml main-spec.json
-          fi
-      
-      - name: Install OpenAPI diff tools
-        run: |
-          npm install -g @redocly/openapi-cli js-yaml
-          curl -fsSL https://raw.githubusercontent.com/oasdiff/oasdiff/main/scripts/install.sh | sh
-      
-      - name: Check for breaking changes
-        id: breaking-check
-        run: |
-          # Run oasdiff to check for breaking changes
-          oasdiff breaking main-spec.json current-spec.json > breaking-changes.txt 2>&1 || true
-          
-          # Check if there are breaking changes
-          if grep -q "breaking changes" breaking-changes.txt; then
-            echo "has_breaking_changes=true" >> $GITHUB_OUTPUT
-            echo "## ⚠️ Breaking API Changes Detected" >> breaking-changes-summary.md
-            echo "" >> breaking-changes-summary.md
-            cat breaking-changes.txt >> breaking-changes-summary.md
-          else
-            echo "has_breaking_changes=false" >> $GITHUB_OUTPUT
-            echo "## ✅ No Breaking API Changes" >> breaking-changes-summary.md
-          fi
-      
-      - name: Generate detailed diff report
-        run: |
-          echo "## API Changes Summary" > api-diff.md
-          echo "" >> api-diff.md
-          
-          # Use redocly to generate a detailed diff (without --format=markdown which is not supported)
-          npx @redocly/openapi-cli diff main-spec.json current-spec.json >> api-diff.md 2>&1 || true
-          
-          # If the diff is empty, note that
-          if [ ! -s api-diff.md ] || grep -q "No differences" api-diff.md; then
-            echo "No differences found between API specifications." > api-diff.md
-          fi
-      
-      - name: Comment PR with API changes
-        uses: actions/github-script@v7
+          printf '\nBase SHA: %s\n\nCurrent merge SHA: %s\n' "$BASE_SHA" "$CURRENT_SHA" \
+            >> "$REPORT_DIR/summary.md"
+          cat "$REPORT_DIR/summary.md" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload OpenAPI reports
+        if: always()
+        uses: actions/upload-artifact@v4
         with:
-          script: |
-            const fs = require('fs');
-            
-            // Read the diff files
-            const breakingSummary = fs.readFileSync('breaking-changes-summary.md', 'utf8');
-            const apiDiff = fs.readFileSync('api-diff.md', 'utf8');
-            
-            // Combine the reports
-            let comment = '# OpenAPI Specification Changes\n\n';
-            comment += breakingSummary + '\n\n';
-            comment += '<details>\n<summary>Detailed API Changes</summary>\n\n';
-            comment += apiDiff + '\n';
-            comment += '</details>\n\n';
-            
-            // Add instructions if there are breaking changes
-            if ('${{ steps.breaking-check.outputs.has_breaking_changes }}' === 'true') {
-              comment += '---\n\n';
-              comment += '**⚠️ Action Required**: This PR introduces breaking API changes. Please:\n';
-              comment += '1. Ensure all API consumers are notified\n';
-              comment += '2. Update API documentation\n';
-              comment += '3. Consider versioning strategy\n';
-              comment += '4. Add `breaking-change` label to this PR\n';
-            }
-            
-            // Find existing comment
-            const { data: comments } = await github.rest.issues.listComments({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: context.issue.number,
-            });
-            
-            const botComment = comments.find(comment => 
-              comment.user.type === 'Bot' && 
-              comment.body.includes('# OpenAPI Specification Changes')
-            );
-            
-            if (botComment) {
-              // Update existing comment
-              await github.rest.issues.updateComment({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                comment_id: botComment.id,
-                body: comment
-              });
-            } else {
-              // Create new comment
-              await github.rest.issues.createComment({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                issue_number: context.issue.number,
-                body: comment
-              });
-            }
-      
-      - name: Fail if breaking changes detected
-        if: steps.breaking-check.outputs.has_breaking_changes == 'true'
+          name: openapi-comparison
+          path: ${{ runner.temp }}/openapi-report/
+          if-no-files-found: error
+
+      - name: Enforce comparison result
+        if: always() && steps.comparison.outcome != 'success'
         run: |
-          echo "❌ Breaking API changes detected!"
-          echo "Please review the changes and ensure they are intentional."
-          echo "If these changes are required, add the 'breaking-change' label to the PR."
+          printf 'OpenAPI comparison did not pass. Review the job summary and artifact.\n' >&2
           exit 1
