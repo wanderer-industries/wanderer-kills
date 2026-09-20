@@ -4,7 +4,7 @@ defmodule WandererKills.MixProject do
   def project do
     [
       app: :wanderer_kills,
-      version: "1.6.1",
+      version: "1.6.2",
       elixir: "~> 1.17",
       start_permanent: Mix.env() == :prod,
       compilers: Mix.compilers() ++ [:boundary],
